@@ -1,6 +1,6 @@
 TEST_PATH=./tests
 MODULES_PATH=./modules
-TRAIN_PATH=train.py
+TRAIN_PATH=train.py inference.py
 
 .PHONY: format
 format:

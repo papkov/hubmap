@@ -4,6 +4,7 @@ from pathlib import Path
 
 import hydra
 import segmentation_models_pytorch as smp
+from adabelief_pytorch import AdaBelief
 from catalyst import utils as cutils
 from catalyst.contrib.callbacks import WandbLogger
 from catalyst.contrib.nn import DiceLoss, IoULoss, Lookahead, RAdam
@@ -22,6 +23,8 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 
 from modules import dataset as D
+from modules.model import get_segmentation_model
+from modules.util import set_device_id
 
 
 @hydra.main(config_path="config", config_name="default.yaml")
@@ -29,11 +32,7 @@ def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg))
 
     set_manual_seed(cfg.seed)
-    if cfg.device is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(cfg.device)
-        device = "cuda"
-    else:
-        device = "cpu"
+    device = set_device_id(cfg.device)
 
     cwd = Path(get_original_cwd())
     # wandb.init(project=cfg.project, config=cfg)
@@ -73,8 +72,12 @@ def main(cfg: DictConfig):
     )
 
     # Model
-    # TODO other architectures in cfg.model.arch
-    model = smp.Linknet(encoder_name=cfg.model.encoder_name, classes=1)
+    model = get_segmentation_model(
+        arch=cfg.model.arch,
+        encoder_name=cfg.model.encoder_name,
+        encoder_weights=cfg.model.encoder_weights,
+        classes=1,
+    )
 
     # Optimization
     # optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -84,8 +87,23 @@ def main(cfg: DictConfig):
         "encoder*": dict(lr=cfg.optim.lr_encoder, weight_decay=cfg.optim.wd_encoder)
     }
     model_params = cutils.process_model_params(model, layerwise_params=layerwise_params)
-    base_optimizer = RAdam(model_params, lr=cfg.optim.lr, weight_decay=cfg.optim.wd)
-    optimizer = Lookahead(base_optimizer)
+
+    # Select optimizer
+    # TODO getter
+    if cfg.optim.name == "radam":
+        base_optimizer = RAdam(model_params, lr=cfg.optim.lr, weight_decay=cfg.optim.wd)
+    elif cfg.optim.name == "adabelief":
+        base_optimizer = AdaBelief(
+            model_params, lr=cfg.optim.lr, weight_decay=cfg.optim.wd
+        )
+    else:
+        raise ValueError
+
+    # Use lookahead
+    if cfg.optim.lookahead:
+        optimizer = Lookahead(base_optimizer)
+    else:
+        optimizer = base_optimizer
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, **cfg.scheduler.plateau)
 
