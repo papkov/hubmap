@@ -97,7 +97,7 @@ def inference_dir(
     images = sorted(list(test_path.glob("*.tiff")))
     rle_encodings = []
     for i, image_path in enumerate(images):
-        print(f'\nPredict image {image_path.as_posix()}')
+        print(f"\nPredict image {image_path.as_posix()}")
         rle_encodings.append(
             inference_one(
                 image_path=image_path,
@@ -152,7 +152,7 @@ def main():
     model = get_segmentation_model(
         arch=cfg.model.arch,
         encoder_name=cfg.model.encoder_name,
-        encoder_weights=cfg.model.encoder_weights,
+        encoder_weights=None,
         classes=1,
     )
     model = model.to(device)

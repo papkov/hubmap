@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional
 
 import segmentation_models_pytorch as smp
 import torch
@@ -8,7 +8,10 @@ from torch.nn import functional as F
 
 
 def get_segmentation_model(
-    arch: str, encoder_name: str, encoder_weights: str = "imagenet", **kwargs: Any
+    arch: str,
+    encoder_name: str,
+    encoder_weights: Optional[str] = "imagenet",
+    **kwargs: Any
 ) -> nn.Module:
     """
     Fetch segmentation model by its name

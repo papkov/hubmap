@@ -1,0 +1,11 @@
+pretrainedmodels==0.7.4
+timm==0.2.1
+efficientnet-pytorch==0.6.3
+git+https://github.com/qubvel/segmentation_models.pytorch
+omegaconf>=2.0.5
+pytorch_toolbelt
+torchnet>=0.0.4
+visdom
+jsonpatch
+jsonpointer>=1.9
+torchfile
