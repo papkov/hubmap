@@ -20,17 +20,7 @@ test:
 .PHONY: requirements
 requirements:
 	python3 -m pip download -r ./requirements.txt -d ./requirements --no-deps
-	for filename in ./requirements/*.tar.gz; do \
-		echo $$filename; \
-		mv $$filename $$filename.whl; \
-	done;
-	for filename in ./requirements/*.zip; do \
-		echo $$filename; \
-		mv $$filename $$filename.whl; \
-	done;
 
 .PHONY: commit
 commit:
-	echo $$m
-	git commit -m $$m
-	kaggle datasets version -p . -m $$m
+	kaggle datasets version -m "$$m" -r tar

@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import torch
 from omegaconf import DictConfig, OmegaConf
-from skimage.transform import resize
 from torch.nn import Module
+from torch.nn.functional import interpolate
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -20,6 +20,7 @@ from modules.util import set_device_id
 PathT = Union[Path, str]
 
 
+@torch.no_grad()
 def inference_one(
     image_path: PathT,
     target_path: PathT,
@@ -28,6 +29,7 @@ def inference_one(
     scale_factor: float,
     tile_size: int,
     tile_step: int,
+    threshold: float = 0.5,
 ):
     image_path = Path(image_path)
     target_path = Path(target_path)
@@ -44,38 +46,41 @@ def inference_one(
     test_loader = DataLoader(
         test_ds,
         batch_size=cfg.loader.valid_bs,
-        num_workers=cfg.loader.num_workers,
+        num_workers=0,  # rasterio cannot be used with multiple workers
         shuffle=False,
         pin_memory=True,
     )
 
     # Predict tiles
-    tiles = []
-    for tiles_batch, coords_batch in tqdm(test_loader, desc="Predict"):
-        tiles_batch = tiles_batch.float().cuda()
-        pred_batch = model(tiles_batch).detach().cpu().numpy().squeeze()
-        tiles.append(pred_batch)
-    tiles = np.concatenate(tiles)
+    tiles = torch.zeros(
+        len(test_ds),
+        int(test_ds.tile_size / test_ds.scale_factor),
+        int(test_ds.tile_size / test_ds.scale_factor),
+        dtype=torch.int8,
+    )
+    for i, (tiles_batch, coords_batch) in enumerate(tqdm(test_loader, desc="Predict")):
+        pred_batch = model(tiles_batch.float().cuda()).cpu()
+        if test_ds.scale_factor != 1:
+            pred_batch = interpolate(pred_batch, scale_factor=1 / test_ds.scale_factor)
+        bs = len(pred_batch)
+        tiles[i * bs : (i + 1) * bs] = (pred_batch.squeeze() > threshold).type(torch.int8)
     print(tiles.shape)
 
     # Merge predicted tiles back and scale to the original image size
-    merged = test_ds.merge(tiles[..., None], scale=True).squeeze()
+    merged = test_ds.tiler.merge(tiles.numpy()[..., None]).squeeze()
 
-    # Save raw predictions for possible ensembling
-    path_merged = str(target_path / f"{test_ds.image_hash}.npy")
-    print(f"Save to {path_merged}")
-    np.save(path_merged, merged)
+    # Save raw predictions for possible ensemble
+    # path_merged = str(target_path / f"{test_ds.image_hash}.npy")
+    # print(f"Save to {path_merged}")
+    # np.save(path_merged, merged)
 
     # RLE encoding
     rle = {
         "id": test_ds.image_hash,
-        # TODO select threshold
-        "predicted": D.rle_encode((merged > 0.5).astype(np.uint8)),
+        "predicted": D.rle_encode_less_memory(merged),
     }
 
-    del test_ds
-    del tiles
-    del merged
+    del test_ds, test_loader, tiles, merged
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -98,8 +103,7 @@ def inference_dir(
     rle_encodings = []
     for i, image_path in enumerate(images):
         print(f"\nPredict image {image_path.as_posix()}")
-        rle_encodings.append(
-            inference_one(
+        rle = inference_one(
                 image_path=image_path,
                 target_path=target_path,
                 cfg=cfg,
@@ -108,7 +112,7 @@ def inference_dir(
                 tile_size=tile_size,
                 tile_step=tile_step,
             )
-        )
+        rle_encodings.append(rle)
 
     rle_encodings = pd.DataFrame(rle_encodings)
     rle_encodings.to_csv(
@@ -121,16 +125,29 @@ def inference_dir(
 def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description="HuBMAP inference")
-    parser.add_argument("-p", "--path", help="Run path", type=str)
+    parser.add_argument(
+        "-p",
+        "--path",
+        help="Run path",
+        type=str,
+        default="runs/unetplusplus-resnext50_32x4d/2020-12-09/00-28-06/",
+    )
     parser.add_argument(
         "--test_path", help="Test data path", default="data/test", type=str
     )
     parser.add_argument(
         "-s", "--scale_factor", help="Scale factor", default=0.25, type=float
     )
+    parser.add_argument(
+        "--batch_size",
+        "-bs",
+        default=64,
+        type=int,
+    )
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--tile_size", help="Tile size", default=256, type=int)
-    parser.add_argument("--tile_step", help="Tile step", default=64, type=int)
+    parser.add_argument("--tile_step", help="Tile step", default=192, type=int)
+    parser.add_argument("--device", "-d", help="Device", default=0, type=int)
     args = parser.parse_args()
 
     # Set working path
@@ -145,8 +162,11 @@ def main():
     print("\nConfig:")
     print(OmegaConf.to_yaml(cfg))
 
+    # Overwrite cfg
+    cfg.loader.valid_bs = args.batch_size
+
     # Set device
-    device = set_device_id(cfg.device)
+    device = set_device_id(args.device)
 
     # Load model once
     model = get_segmentation_model(
@@ -155,14 +175,17 @@ def main():
         encoder_weights=None,
         classes=1,
     )
-    model = model.to(device)
-    model.eval()
 
     # Load checkpoint
     path_ckpt = path / cfg.train.logdir / "checkpoints/best.pth"
     print(f"\nLoading checkpoint {str(path_ckpt)}")
-    ckpt = torch.load(path_ckpt)
-    model.load_state_dict(ckpt["model_state_dict"])
+    state_dict = torch.load(path_ckpt, map_location=torch.device('cpu'))["model_state_dict"]
+    model.load_state_dict(state_dict)
+    model = model.to(device)
+    model = model.float()
+    model.eval()
+    del state_dict
+    gc.collect()
 
     return inference_dir(
         test_path=args.test_path,

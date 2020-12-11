@@ -15,7 +15,7 @@ data:
   std: [0.15167958, 0.23584107, 0.13146145]
 
 loader:
-  train_bs: 12
+  train_bs: 16
   valid_bs: 16
   num_workers: 4
 
