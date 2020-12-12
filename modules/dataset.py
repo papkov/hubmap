@@ -10,7 +10,7 @@ import tifffile as tiff
 import torch
 from albumentations.pytorch.transforms import ToTensorV2
 from PIL import Image
-from pytorch_toolbelt.inference.tiles import CudaTileMerger, ImageSlicer
+from pytorch_toolbelt.inference.tiles import ImageSlicer
 from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image, to_numpy
 from rasterio.enums import Resampling
 from rasterio.errors import RasterioIOError
@@ -87,7 +87,50 @@ def rle_decode(mask_rle, shape=(256, 256)):
     return img.reshape(shape, order="F")
 
 
-class TileMerger(CudaTileMerger):
+class CudaTileMerger:
+    """
+    Helper class to merge final image on GPU. This generally faster than moving individual tiles to CPU.
+    """
+
+    def __init__(self, image_shape, channels, weight):
+        """
+
+        :param image_shape: Shape of the source image
+        :param channels:
+        :param weight: Weighting matrix
+        """
+        self.image_height = image_shape[0]
+        self.image_width = image_shape[1]
+
+        self.weight = (
+            torch.from_numpy(np.expand_dims(weight, axis=0)).type(torch.int8).cuda()
+        )
+        self.channels = channels
+        self.image = (
+            torch.zeros((channels, self.image_height, self.image_width)).float().cuda()
+        )
+        self.norm_mask = torch.zeros(
+            (1, self.image_height, self.image_width), dtype=torch.int8
+        ).cuda()
+
+    def integrate_batch(self, batch: torch.Tensor, crop_coords):
+        """
+        Accumulates batch of tile predictions
+        :param batch: Predicted tiles
+        :param crop_coords: Corresponding tile crops w.r.t to original image
+        """
+        if len(batch) != len(crop_coords):
+            raise ValueError(
+                "Number of images in batch does not correspond to number of coordinates"
+            )
+
+        for tile, (x, y, tile_width, tile_height) in zip(batch, crop_coords):
+            self.image[:, y : y + tile_height, x : x + tile_width] += tile * self.weight
+            self.norm_mask[:, y : y + tile_height, x : x + tile_width] += self.weight
+
+    def merge(self) -> torch.Tensor:
+        return self.image / self.norm_mask
+
     def merge_(self) -> None:
         """
         Inplace version of CudaTileMerger.merge()
@@ -290,7 +333,7 @@ class TestDataset(TiffFile):
 
         # CUDA merger (might take a lot of memory)
         if self.use_cuda_merger:
-            self.merger = TileMerger(
+            self.merger = CudaTileMerger(
                 self.tiler.target_shape, channels=1, weight=self.tiler.weight
             )
         else:
