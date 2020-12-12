@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import rasterio
 import tifffile as tiff
+import torch
 from albumentations.pytorch.transforms import ToTensorV2
 from PIL import Image
 from pytorch_toolbelt.inference.tiles import CudaTileMerger, ImageSlicer
@@ -53,14 +54,14 @@ def rle_encode(im):
 
 
 # New version
-def rle_encode_less_memory(img):
+def rle_encode_less_memory(pixels):
     """
     https://www.kaggle.com/bguberfain/memory-aware-rle-encoding
     img: numpy array, 1 - mask, 0 - background
     Returns run length as string formatted
     This simplified method requires first and last pixel to be zero
     """
-    pixels = img.flatten(order="F")
+    pixels = pixels.T.flatten()
     # This simplified method requires first and last pixel to be zero
     pixels[0] = 0
     pixels[-1] = 0
@@ -84,6 +85,24 @@ def rle_decode(mask_rle, shape=(256, 256)):
     for lo, hi in zip(starts, ends):
         img[lo:hi] = 1
     return img.reshape(shape, order="F")
+
+
+class TileMerger(CudaTileMerger):
+    def merge_(self) -> None:
+        """
+        Inplace version of CudaTileMerger.merge()
+        Substitute self.image with self.image / self.norm_mask
+        :return: None
+        """
+        self.image.div_(self.norm_mask)
+
+    def threshold_(self, threshold: float = 0.5) -> None:
+        """
+        Inplace thresholding of self.image
+        :return: None
+        """
+        self.image.gt_(threshold)
+        self.image.type(torch.int8)
 
 
 @dataclass
@@ -155,7 +174,7 @@ class TrainDataset(Dataset):
 class TiffFile(Dataset):
     path: Union[Path, str]
     tile_size: Union[Tuple[int, int], int] = 256
-    tile_step: Union[Tuple[int, int], int] = 32
+    tile_step: Union[Tuple[int, int], int] = 224
     scale_factor: float = 1
     random_crop: bool = False
     num_threads: Union[str, int] = "all_cpus"
@@ -271,7 +290,7 @@ class TestDataset(TiffFile):
 
         # CUDA merger (might take a lot of memory)
         if self.use_cuda_merger:
-            self.merger = CudaTileMerger(
+            self.merger = TileMerger(
                 self.tiler.target_shape, channels=1, weight=self.tiler.weight
             )
         else:

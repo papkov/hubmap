@@ -30,6 +30,7 @@ def inference_one(
     tile_size: int,
     tile_step: int,
     threshold: float = 0.5,
+    use_cuda_merger: bool = True,
 ):
     image_path = Path(image_path)
     target_path = Path(target_path)
@@ -41,6 +42,7 @@ def inference_one(
         scale_factor=scale_factor,
         tile_size=tile_size,
         tile_step=tile_step,
+        use_cuda_merger=use_cuda_merger,
     )
 
     test_loader = DataLoader(
@@ -51,23 +53,36 @@ def inference_one(
         pin_memory=True,
     )
 
-    # Predict tiles
-    tiles = torch.zeros(
-        len(test_ds),
-        int(test_ds.tile_size / test_ds.scale_factor),
-        int(test_ds.tile_size / test_ds.scale_factor),
-        dtype=torch.int8,
-    )
+    # Allocate tiles
+    tiles = None
+    if not use_cuda_merger:
+        # if use cuda merger, they were allocated in test_ds
+        tiles = torch.zeros(
+            len(test_ds),
+            int(test_ds.tile_size / test_ds.scale_factor),
+            int(test_ds.tile_size / test_ds.scale_factor),
+            dtype=torch.int8,
+        )
+
     for i, (tiles_batch, coords_batch) in enumerate(tqdm(test_loader, desc="Predict")):
-        pred_batch = model(tiles_batch.float().cuda()).cpu()
+        pred_batch = model(tiles_batch.float().cuda())
         if test_ds.scale_factor != 1:
             pred_batch = interpolate(pred_batch, scale_factor=1 / test_ds.scale_factor)
         bs = len(pred_batch)
-        tiles[i * bs : (i + 1) * bs] = (pred_batch.squeeze() > threshold).type(torch.int8)
-    print(tiles.shape)
+        if use_cuda_merger:
+            test_ds.merger.integrate_batch(batch=pred_batch, crop_coords=coords_batch)
+        else:
+            tiles[i * bs : (i + 1) * bs] = (
+                pred_batch.cpu().squeeze() > threshold
+            ).type(torch.int8)
 
     # Merge predicted tiles back and scale to the original image size
-    merged = test_ds.tiler.merge(tiles.numpy()[..., None]).squeeze()
+    if use_cuda_merger:
+        test_ds.merger.merge_()
+        test_ds.merger.threshold_(threshold)
+        merged = test_ds.merger.image.cpu().numpy().squeeze().astype(np.uint8)
+    else:
+        merged = test_ds.tiler.merge(tiles.numpy()[..., None]).squeeze()
 
     # Save raw predictions for possible ensemble
     # path_merged = str(target_path / f"{test_ds.image_hash}.npy")
@@ -95,6 +110,7 @@ def inference_dir(
     scale_factor: float,
     tile_size: int,
     tile_step: int,
+    use_cuda_merger: bool = True,
 ):
     test_path = Path(test_path)
     target_path = Path(target_path)
@@ -104,14 +120,15 @@ def inference_dir(
     for i, image_path in enumerate(images):
         print(f"\nPredict image {image_path.as_posix()}")
         rle = inference_one(
-                image_path=image_path,
-                target_path=target_path,
-                cfg=cfg,
-                model=model,
-                scale_factor=scale_factor,
-                tile_size=tile_size,
-                tile_step=tile_step,
-            )
+            image_path=image_path,
+            target_path=target_path,
+            cfg=cfg,
+            model=model,
+            scale_factor=scale_factor,
+            tile_size=tile_size,
+            tile_step=tile_step,
+            use_cuda_merger=use_cuda_merger,
+        )
         rle_encodings.append(rle)
 
     rle_encodings = pd.DataFrame(rle_encodings)
@@ -141,13 +158,21 @@ def main():
     parser.add_argument(
         "--batch_size",
         "-bs",
-        default=64,
+        default=8,
         type=int,
+    )
+
+    parser.add_argument(
+        "--use_cuda_merger",
+        "-c",
+        default=True,
+        type=bool,
     )
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--tile_size", help="Tile size", default=256, type=int)
-    parser.add_argument("--tile_step", help="Tile step", default=192, type=int)
-    parser.add_argument("--device", "-d", help="Device", default=0, type=int)
+    parser.add_argument("--tile_step", help="Tile step", default=224, type=int)
+    parser.add_argument("--device", "-d", help="Device", default=1, type=int)
+
     args = parser.parse_args()
 
     # Set working path
@@ -179,7 +204,9 @@ def main():
     # Load checkpoint
     path_ckpt = path / cfg.train.logdir / "checkpoints/best.pth"
     print(f"\nLoading checkpoint {str(path_ckpt)}")
-    state_dict = torch.load(path_ckpt, map_location=torch.device('cpu'))["model_state_dict"]
+    state_dict = torch.load(path_ckpt, map_location=torch.device("cpu"))[
+        "model_state_dict"
+    ]
     model.load_state_dict(state_dict)
     model = model.to(device)
     model = model.float()
@@ -195,6 +222,7 @@ def main():
         scale_factor=args.scale_factor,
         tile_step=args.tile_step,
         tile_size=args.tile_size,
+        use_cuda_merger=args.use_cuda_merger,
     )
 
 
