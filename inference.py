@@ -31,6 +31,7 @@ def inference_one(
     tile_step: int,
     threshold: float = 0.5,
     use_cuda_merger: bool = True,
+    save_raw: bool = False,  # works only with cuda merger now
 ):
     image_path = Path(image_path)
     target_path = Path(target_path)
@@ -79,8 +80,20 @@ def inference_one(
     # Merge predicted tiles back and scale to the original image size
     if use_cuda_merger:
         test_ds.merger.merge_()
+        if save_raw:
+            path_merged = str(target_path / f"{test_ds.image_hash}.pt")
+            torch.save(test_ds.merger.image, path_merged)
         test_ds.merger.threshold_(threshold)
         merged = test_ds.merger.image.cpu().numpy().squeeze().astype(np.uint8)
+
+        # Crop to original size inplace
+        merged = merged[
+            test_ds.tiler.margin_top : test_ds.tiler.image_height
+            + test_ds.tiler.margin_top,
+            test_ds.tiler.margin_left : test_ds.tiler.image_width
+            + test_ds.tiler.margin_left,
+        ]
+
     else:
         merged = test_ds.tiler.merge(tiles.numpy()[..., None]).squeeze()
 
@@ -158,7 +171,7 @@ def main():
     parser.add_argument(
         "--batch_size",
         "-bs",
-        default=8,
+        default=4,
         type=int,
     )
 
@@ -171,7 +184,7 @@ def main():
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--tile_size", help="Tile size", default=256, type=int)
     parser.add_argument("--tile_step", help="Tile step", default=224, type=int)
-    parser.add_argument("--device", "-d", help="Device", default=1, type=int)
+    parser.add_argument("--device", "-d", help="Device", default=2, type=int)
 
     args = parser.parse_args()
 
@@ -182,13 +195,11 @@ def main():
     # TODO possible overwrite?
     target_path.mkdir(exist_ok=True)
 
-    # Read config
+    # Read config, overwrite if necessary
     cfg = OmegaConf.load(path / ".hydra" / "config.yaml")
+    cfg.loader.valid_bs = args.batch_size
     print("\nConfig:")
     print(OmegaConf.to_yaml(cfg))
-
-    # Overwrite cfg
-    cfg.loader.valid_bs = args.batch_size
 
     # Set device
     device = set_device_id(args.device)
