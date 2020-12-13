@@ -103,14 +103,14 @@ class CudaTileMerger:
         self.image_width = image_shape[1]
 
         self.weight = (
-            torch.from_numpy(np.expand_dims(weight, axis=0)).type(torch.int8).cuda()
+            torch.from_numpy(np.expand_dims(weight, axis=0)).type(torch.uint8).cuda()
         )
         self.channels = channels
         self.image = (
             torch.zeros((channels, self.image_height, self.image_width)).float().cuda()
         )
         self.norm_mask = torch.zeros(
-            (1, self.image_height, self.image_width), dtype=torch.int8
+            (1, self.image_height, self.image_width), dtype=torch.uint8
         ).cuda()
 
     def integrate_batch(self, batch: torch.Tensor, crop_coords):
@@ -221,6 +221,7 @@ class TiffFile(Dataset):
     scale_factor: float = 1
     random_crop: bool = False
     num_threads: Union[str, int] = "all_cpus"
+    weight: str = "pyramid"
 
     def __post_init__(self):
         # Get image hash name
@@ -237,6 +238,7 @@ class TiffFile(Dataset):
             self.image.shape,
             tile_size=int(self.tile_size / self.scale_factor),
             tile_step=int(self.tile_step / self.scale_factor),
+            weight=self.weight,
         )
 
     def __len__(self):
@@ -311,6 +313,7 @@ class TestDataset(TiffFile):
     std: Tuple[float] = (0.229, 0.224, 0.225)
     cache_tiles: bool = False
     use_cuda_merger: bool = False
+    weight_steps: int = 15  # Should be okay not to exceed 255 in uint8 (16 * 8 tta * 2 max overlap = 256)
 
     def __post_init__(self):
         super().__post_init__()
@@ -334,7 +337,11 @@ class TestDataset(TiffFile):
         # CUDA merger (might take a lot of memory)
         if self.use_cuda_merger:
             self.merger = CudaTileMerger(
-                self.tiler.target_shape, channels=1, weight=self.tiler.weight
+                self.tiler.target_shape,
+                channels=1,
+                weight=(
+                    self.tiler.weight / self.tiler.weight.max() * self.weight_steps
+                ).astype(np.uint8),
             )
         else:
             self.merger = None

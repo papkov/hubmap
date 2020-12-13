@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import torch
 from omegaconf import DictConfig, OmegaConf
-from pytorch_toolbelt.inference import tta
-from torch.nn import Module
+from pytorch_toolbelt.inference import functional as F
+from torch.nn import Identity, Module
 from torch.nn.functional import interpolate
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -66,17 +66,42 @@ def inference_one(
             dtype=torch.int8,
         )
 
+    # Test time augmentations
+    tta = [
+        Identity(),
+        F.torch_rot90_cw,
+        F.torch_rot180,
+        F.torch_rot90_ccw,
+        F.torch_transpose,
+        F.torch_transpose_rot90_cw,
+        F.torch_transpose_rot180,
+        F.torch_transpose_rot90_ccw,
+        # F.torch_fliplr,
+        # F.torch_flipud,
+    ]
+
     for i, (tiles_batch, coords_batch) in enumerate(tqdm(test_loader, desc="Predict")):
-        pred_batch = model(tiles_batch.float().cuda())
-        if test_ds.scale_factor != 1:
-            pred_batch = interpolate(pred_batch, scale_factor=1 / test_ds.scale_factor)
-        bs = len(pred_batch)
-        if use_cuda_merger:
-            test_ds.merger.integrate_batch(batch=pred_batch, crop_coords=coords_batch)
-        else:
-            tiles[i * bs : (i + 1) * bs] = (
-                pred_batch.cpu().squeeze() > threshold
-            ).type(torch.int8)
+        for augmentation in tta:
+            pred_batch = model(augmentation(tiles_batch).float().cuda())
+
+            # Upscale if needed
+            if test_ds.scale_factor != 1:
+                pred_batch = interpolate(
+                    pred_batch, scale_factor=1 / test_ds.scale_factor
+                )
+
+            if use_cuda_merger:
+                # Integrate in allocated CUDA tensor
+                # Integration adds weight to norm_mask, so no need to additionally normalize TTA
+                test_ds.merger.integrate_batch(
+                    batch=pred_batch, crop_coords=coords_batch
+                )
+            else:
+                # Or add in tiles
+                bs = len(pred_batch)
+                tiles[i * bs : (i + 1) * bs] += (
+                    pred_batch.cpu().squeeze() > threshold
+                ).type(torch.int8)
 
     # Merge predicted tiles back and scale to the original image size
     if use_cuda_merger:
@@ -84,6 +109,7 @@ def inference_one(
         if save_raw:
             path_merged = str(target_path / f"{test_ds.image_hash}.pt")
             torch.save(test_ds.merger.image, path_merged)
+
         test_ds.merger.threshold_(threshold)
         merged = test_ds.merger.image.cpu().numpy().squeeze().astype(np.uint8)
 
@@ -96,6 +122,8 @@ def inference_one(
         ]
 
     else:
+        # Leave major voting for now
+        tiles = tiles // len(tta)
         merged = test_ds.tiler.merge(tiles.numpy()[..., None]).squeeze()
 
     # Save raw predictions for possible ensemble
