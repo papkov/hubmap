@@ -6,147 +6,15 @@ import albumentations as albu
 import cv2
 import numpy as np
 import rasterio
-import tifffile as tiff
-import torch
 from albumentations.pytorch.transforms import ToTensorV2
 from PIL import Image
 from pytorch_toolbelt.inference.tiles import ImageSlicer
-from pytorch_toolbelt.utils.torch_utils import tensor_from_rgb_image, to_numpy
 from rasterio.enums import Resampling
-from rasterio.errors import RasterioIOError
 from rasterio.windows import Window
-from skimage.transform import rescale, resize
 from torch import Tensor as T
-from torch.nn import Upsample
 from torch.utils.data import Dataset
-from tqdm.auto import tqdm
 
 Array = np.ndarray
-
-
-def read_tiff(path: str, scale_factor: float):
-    identity = rasterio.Affine(1, 0, 0, 0, 1, 0)
-    with rasterio.open(path, transform=identity) as image:
-        image = image.read(
-            out_shape=(
-                image.count,
-                int(image.height * scale_factor),
-                int(image.width * scale_factor),
-            ),
-            resampling=Resampling.bilinear,
-        )
-        if image.shape[-1] != 3:
-            image = np.moveaxis(image, 0, -1)
-        return image
-
-
-def rle_encode(im):
-    """
-    https://www.kaggle.com/finlay/pytorch-fcn-resnet50-in-20-minute
-    im: numpy array, 1 - mask, 0 - background
-    Returns run length as string formated
-    """
-    pixels = im.flatten(order="F")
-    pixels = np.concatenate([[0], pixels, [0]])
-    runs = np.where(pixels[1:] != pixels[:-1])[0] + 1
-    runs[1::2] -= runs[::2]
-    return " ".join(str(x) for x in runs)
-
-
-# New version
-def rle_encode_less_memory(pixels):
-    """
-    https://www.kaggle.com/bguberfain/memory-aware-rle-encoding
-    img: numpy array, 1 - mask, 0 - background
-    Returns run length as string formatted
-    This simplified method requires first and last pixel to be zero
-    """
-    pixels = pixels.T.flatten()
-    # This simplified method requires first and last pixel to be zero
-    pixels[0] = 0
-    pixels[-1] = 0
-    runs = np.where(pixels[1:] != pixels[:-1])[0] + 2
-    runs[1::2] -= runs[::2]
-    return " ".join(str(x) for x in runs)
-
-
-def rle_decode(mask_rle, shape=(256, 256)):
-    """
-    https://www.kaggle.com/finlay/pytorch-fcn-resnet50-in-20-minute
-    mask_rle: run-length as string formatted (start length)
-    shape: (height,width) of array to return
-    Returns numpy array, 1 - mask, 0 - background
-    """
-    s = mask_rle.split()
-    starts, lengths = [np.asarray(x, dtype=int) for x in (s[0:][::2], s[1:][::2])]
-    starts -= 1
-    ends = starts + lengths
-    img = np.zeros(shape[0] * shape[1], dtype=np.uint8)
-    for lo, hi in zip(starts, ends):
-        img[lo:hi] = 1
-    return img.reshape(shape, order="F")
-
-
-class CudaTileMerger:
-    """
-    Helper class to merge final image on GPU. This generally faster than moving individual tiles to CPU.
-    """
-
-    def __init__(self, image_shape, channels, weight):
-        """
-
-        :param image_shape: Shape of the source image
-        :param channels:
-        :param weight: Weighting matrix
-        """
-        self.image_height = image_shape[0]
-        self.image_width = image_shape[1]
-
-        self.weight = (
-            torch.from_numpy(np.expand_dims(weight, axis=0)).type(torch.uint8).cuda()
-        )
-        self.channels = channels
-        self.image = (
-            torch.zeros((channels, self.image_height, self.image_width)).float().cuda()
-        )
-        self.norm_mask = torch.zeros(
-            (1, self.image_height, self.image_width), dtype=torch.uint8
-        ).cuda()
-
-    def integrate_batch(self, batch: torch.Tensor, crop_coords):
-        """
-        Accumulates batch of tile predictions
-        :param batch: Predicted tiles
-        :param crop_coords: Corresponding tile crops w.r.t to original image
-        """
-        if len(batch) != len(crop_coords):
-            raise ValueError(
-                "Number of images in batch does not correspond to number of coordinates"
-            )
-
-        for tile, (x, y, tile_width, tile_height) in zip(batch, crop_coords):
-            self.image[:, y : y + tile_height, x : x + tile_width] += tile * self.weight
-            self.norm_mask[:, y : y + tile_height, x : x + tile_width] += self.weight
-
-    def merge(self) -> torch.Tensor:
-        return self.image / self.norm_mask
-
-    def merge_(self) -> None:
-        """
-        Inplace version of CudaTileMerger.merge()
-        Substitute self.image with self.image / self.norm_mask
-        :return: None
-        """
-        self.image.div_(self.norm_mask)
-
-    def threshold_(self, threshold: float = 0.5) -> None:
-        """
-        Inplace thresholding of self.image
-        :return: None
-        """
-        self.image.sigmoid_()
-        self.image.gt_(threshold)
-        self.image.type(torch.int8)
 
 
 @dataclass
@@ -218,7 +86,7 @@ class TrainDataset(Dataset):
 class TiffFile(Dataset):
     path: Union[Path, str]
     tile_size: Union[Tuple[int, int], int] = 256
-    tile_step: Union[Tuple[int, int], int] = 224
+    tile_step: Union[Tuple[int, int], int] = 192
     scale_factor: float = 1
     random_crop: bool = False
     num_threads: Union[str, int] = "all_cpus"
@@ -246,55 +114,26 @@ class TiffFile(Dataset):
         return len(self.tiler.crops)
 
     def __getitem__(self, i: int) -> Array:
-        crop = self.tiler.crops[i]
-
-        x, y, tile_width, tile_height = crop
-        if self.random_crop:
-            x = np.random.randint(0, self.tiler.image_width)
-            y = np.random.randint(0, self.tiler.image_height)
-
-        # Get original coordinates with padding
-        x0 = x - self.tiler.margin_left  # may be negative
-        y0 = y - self.tiler.margin_top
-        x1 = x0 + tile_width  # may overflow image size
-        y1 = y0 + tile_height
-
-        # Restrict coordinated by image size
-        ix0 = max(x0, 0)
-        iy0 = max(y0, 0)
-        ix1 = min(x1, self.image.shape[1])
-        iy1 = min(y1, self.image.shape[0])
-
-        # Set shifts for the tile
-        tx0 = ix0 - x0  # >= 0
-        ty0 = iy0 - y0
-        tx1 = tile_width + ix1 - x1  # <= tile_width
-        ty1 = tile_height + iy1 - y1  # <= tile_height
-
+        x, y, tile_width, tile_height = self.tiler.crops[i]
+        (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.tiler.crop_no_pad(
+            i, self.random_crop
+        )
         # print((x0, x1, y0, y1), (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1))
 
         # Allocate tile
         tile = np.zeros((tile_width, tile_height, self.image.count), dtype=np.uint8)
 
         # Read window
-        possible_retries = 3
-        for retry in range(possible_retries):
-            try:
-                window = self.image.read(
-                    [1, 2, 3],  # read all three channels
-                    window=Window.from_slices((iy0, iy1), (ix0, ix1)),
-                )
-                # Reshape if necessary
-                if window.shape[-1] != 3:
-                    window = np.moveaxis(window, 0, -1)
+        window = self.image.read(
+            [1, 2, 3],  # read all three channels
+            window=Window.from_slices((iy0, iy1), (ix0, ix1)),
+        )
+        # Reshape if necessary
+        if window.shape[-1] != 3:
+            window = np.moveaxis(window, 0, -1)
 
-                # Map read image to the tile
-                tile[ty0:ty1, tx0:tx1] = window
-                break
-
-            except RasterioIOError as e:
-                # TODO do nothing now, fix later
-                print(f"RasterioIOError at index {i}, retry {retry}:", e)
+        # Map read image to the tile
+        tile[ty0:ty1, tx0:tx1] = window
 
         # Scale the tile
         tile = cv2.resize(
@@ -313,8 +152,6 @@ class TestDataset(TiffFile):
     mean: Tuple[float] = (0.485, 0.456, 0.406)
     std: Tuple[float] = (0.229, 0.224, 0.225)
     cache_tiles: bool = False
-    use_cuda_merger: bool = False
-    weight_steps: int = 127  # Not to exceed 255 in uint8 anyhow (even with step 1)
 
     def __post_init__(self):
         super().__post_init__()
@@ -335,23 +172,6 @@ class TestDataset(TiffFile):
         else:
             self.tiles = None
 
-        # CUDA merger (might take a lot of memory)
-        if self.use_cuda_merger:
-            # Normalize weight to make it laddered uint8
-            weight = (
-                (self.tiler.weight - self.tiler.weight.min())
-                / self.tiler.weight.max()  # Give all zeros for "mean" and ladder for "pyramid"
-                * self.weight_steps
-                + 1
-            ).astype(np.uint8)
-            self.merger = CudaTileMerger(
-                self.tiler.target_shape,
-                channels=1,
-                weight=weight,
-            )
-        else:
-            self.merger = None
-
         # Transforms
         self.transforms = albu.Compose(
             [albu.Normalize(mean=self.mean, std=self.std), ToTensorV2()]
@@ -370,11 +190,6 @@ class TestDataset(TiffFile):
 
     def __len__(self) -> int:
         return len(self.tiler.crops)
-
-    def integrate_batch(self, pred_batch, coords_batch):
-        if self.merger is None:
-            return
-        self.merger.integrate_batch(pred_batch, coords_batch)
 
 
 def get_training_augmentations():

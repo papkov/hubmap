@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 from omegaconf import DictConfig, OmegaConf
 from pytorch_toolbelt.inference import functional as F
+from pytorch_toolbelt.inference.tiles import TileMerger
 from torch import sigmoid
 from torch.nn import Identity, Module
 from torch.nn.functional import interpolate
@@ -17,7 +18,7 @@ from tqdm.auto import tqdm
 
 from modules import dataset as D
 from modules.model import get_segmentation_model
-from modules.util import set_device_id
+from modules.util import rle_encode_less_memory, set_device_id
 
 PathT = Union[Path, str]
 
@@ -32,10 +33,10 @@ def inference_one(
     tile_size: int,
     tile_step: int,
     threshold: float = 0.5,
-    use_cuda_merger: bool = True,
-    save_raw: bool = False,  # works only with cuda merger now
+    save_raw: bool = False,
     tta_mode: int = 8,
     weight: str = "pyramid",
+    device: str = "gpu",
 ):
     image_path = Path(image_path)
     target_path = Path(target_path)
@@ -47,7 +48,6 @@ def inference_one(
         scale_factor=scale_factor,
         tile_size=tile_size,
         tile_step=tile_step,
-        use_cuda_merger=use_cuda_merger,
         weight=weight,
     )
 
@@ -60,15 +60,12 @@ def inference_one(
     )
 
     # Allocate tiles
-    tiles = None
-    if not use_cuda_merger:
-        # if use cuda merger, they were allocated in test_ds
-        tiles = torch.zeros(
-            len(test_ds),
-            int(test_ds.tile_size / test_ds.scale_factor),
-            int(test_ds.tile_size / test_ds.scale_factor),
-            dtype=torch.int8,
-        )
+    merger = TileMerger(
+        test_ds.tiler.target_shape,
+        channels=1,
+        weight=test_ds.tiler.weight,
+        device=device,
+    )
 
     # Test time augmentations
     tta = [
@@ -103,54 +100,34 @@ def inference_one(
         if test_ds.scale_factor != 1:
             pred_batch = interpolate(pred_batch, scale_factor=1 / test_ds.scale_factor)
 
-        if use_cuda_merger:
-            # Integrate in allocated CUDA tensor
-            # Integration adds weight to norm_mask, so no need to additionally normalize TTA
-            test_ds.merger.integrate_batch(batch=pred_batch, crop_coords=coords_batch)
-        else:
-            # Or add in tiles
-            bs = len(pred_batch)
-            tiles[i * bs : (i + 1) * bs] += (
-                pred_batch.cpu().squeeze() > threshold
-            ).type(torch.int8)
+        merger.integrate_batch(batch=pred_batch, crop_coords=coords_batch)
 
-    # Merge predicted tiles back and scale to the original image size
-    if use_cuda_merger:
-        test_ds.merger.merge_()
-        if save_raw:
-            path_merged = str(target_path / f"{test_ds.image_hash}.pt")
-            path_merged_norm_mask = str(
-                target_path / f"{test_ds.image_hash}_norm_map.pt"
-            )
-            torch.save(test_ds.merger.image, path_merged)
-            torch.save(test_ds.merger.norm_mask, path_merged_norm_mask)
+    # Merge predicted tiles back
+    merger.merge_()
+    if save_raw:
+        path_merged = str(target_path / f"{test_ds.image_hash}.pt")
+        path_merged_norm_mask = str(target_path / f"{test_ds.image_hash}_norm_map.pt")
+        torch.save(merger.image, path_merged)
+        torch.save(merger.norm_mask, path_merged_norm_mask)
 
-        test_ds.merger.threshold_(threshold)
-        merged = test_ds.merger.image.cpu().numpy().squeeze().astype(np.uint8)
+    merger.threshold_(threshold)
+    merged = merger.image.cpu().numpy().squeeze().astype(np.uint8)
 
-        # Crop to original size inplace
-        merged = merged[
-            test_ds.tiler.margin_top : test_ds.tiler.image_height
-            + test_ds.tiler.margin_top,
-            test_ds.tiler.margin_left : test_ds.tiler.image_width
-            + test_ds.tiler.margin_left,
-        ]
-
-    else:
-        merged = test_ds.tiler.merge(tiles.numpy()[..., None]).squeeze()
-
-    # Save raw predictions for possible ensemble
-    # path_merged = str(target_path / f"{test_ds.image_hash}.npy")
-    # print(f"Save to {path_merged}")
-    # np.save(path_merged, merged)
+    # Crop to original size inplace
+    merged = merged[
+        test_ds.tiler.margin_top : test_ds.tiler.image_height
+        + test_ds.tiler.margin_top,
+        test_ds.tiler.margin_left : test_ds.tiler.image_width
+        + test_ds.tiler.margin_left,
+    ]
 
     # RLE encoding
     rle = {
         "id": test_ds.image_hash,
-        "predicted": D.rle_encode_less_memory(merged),
+        "predicted": rle_encode_less_memory(merged),
     }
 
-    del test_ds, test_loader, tiles, merged
+    del test_ds, test_loader, merged
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -165,10 +142,10 @@ def inference_dir(
     scale_factor: float,
     tile_size: int,
     tile_step: int,
-    use_cuda_merger: bool = True,
-    save_raw: bool = False,  # works only with cuda merger now
+    save_raw: bool = False,
     tta_mode: int = 8,
     weight: str = "pyramid",
+    device: str = "gpu",
 ):
     test_path = Path(test_path)
     target_path = Path(target_path)
@@ -185,10 +162,10 @@ def inference_dir(
             scale_factor=scale_factor,
             tile_size=tile_size,
             tile_step=tile_step,
-            use_cuda_merger=use_cuda_merger,
             save_raw=save_raw,
             tta_mode=tta_mode,
             weight=weight,
+            device=device,
         )
         rle_encodings.append(rle)
 
@@ -224,16 +201,11 @@ def main():
     )
     parser.add_argument("--tta", default=8, choices=[0, 4, 8], type=int)
 
-    parser.add_argument(
-        "--use_cuda_merger",
-        "-c",
-        default=True,
-        type=bool,
-    )
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--tile_size", help="Tile size", default=256, type=int)
     parser.add_argument("--tile_step", help="Tile step", default=192, type=int)
     parser.add_argument("--device", "-d", help="Device", default=2, type=int)
+    parser.add_argument("--save_raw", action="store_true")
 
     args = parser.parse_args()
 
@@ -282,7 +254,8 @@ def main():
         scale_factor=args.scale_factor,
         tile_step=args.tile_step,
         tile_size=args.tile_size,
-        use_cuda_merger=args.use_cuda_merger,
+        device=device,
+        save_raw=args.save_raw,
         tta_mode=args.tta,
     )
 
