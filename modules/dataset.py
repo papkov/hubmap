@@ -144,6 +144,7 @@ class CudaTileMerger:
         Inplace thresholding of self.image
         :return: None
         """
+        self.image.sigmoid_()
         self.image.gt_(threshold)
         self.image.type(torch.int8)
 
@@ -313,7 +314,7 @@ class TestDataset(TiffFile):
     std: Tuple[float] = (0.229, 0.224, 0.225)
     cache_tiles: bool = False
     use_cuda_merger: bool = False
-    weight_steps: int = 15  # Should be okay not to exceed 255 in uint8 (16 * 8 tta * 2 max overlap = 256)
+    weight_steps: int = 127  # Not to exceed 255 in uint8 anyhow (even with step 1)
 
     def __post_init__(self):
         super().__post_init__()
@@ -336,12 +337,17 @@ class TestDataset(TiffFile):
 
         # CUDA merger (might take a lot of memory)
         if self.use_cuda_merger:
+            # Normalize weight to make it laddered uint8
+            weight = (
+                (self.tiler.weight - self.tiler.weight.min())
+                / self.tiler.weight.max()  # Give all zeros for "mean" and ladder for "pyramid"
+                * self.weight_steps
+                + 1
+            ).astype(np.uint8)
             self.merger = CudaTileMerger(
                 self.tiler.target_shape,
                 channels=1,
-                weight=(
-                    self.tiler.weight / self.tiler.weight.max() * self.weight_steps
-                ).astype(np.uint8),
+                weight=weight,
             )
         else:
             self.merger = None

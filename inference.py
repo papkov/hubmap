@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 from omegaconf import DictConfig, OmegaConf
 from pytorch_toolbelt.inference import functional as F
+from torch import sigmoid
 from torch.nn import Identity, Module
 from torch.nn.functional import interpolate
 from torch.utils.data import DataLoader
@@ -33,6 +34,8 @@ def inference_one(
     threshold: float = 0.5,
     use_cuda_merger: bool = True,
     save_raw: bool = False,  # works only with cuda merger now
+    tta_mode: int = 8,
+    weight: str = "pyramid",
 ):
     image_path = Path(image_path)
     target_path = Path(target_path)
@@ -45,6 +48,7 @@ def inference_one(
         tile_size=tile_size,
         tile_step=tile_step,
         use_cuda_merger=use_cuda_merger,
+        weight=weight,
     )
 
     test_loader = DataLoader(
@@ -68,47 +72,58 @@ def inference_one(
 
     # Test time augmentations
     tta = [
-        Identity(),
-        F.torch_rot90_cw,
-        F.torch_rot180,
-        F.torch_rot90_ccw,
-        F.torch_transpose,
-        F.torch_transpose_rot90_cw,
-        F.torch_transpose_rot180,
-        F.torch_transpose_rot90_ccw,
-        # F.torch_fliplr,
-        # F.torch_flipud,
+        (F.torch_fliplr, F.torch_fliplr),
+        (F.torch_flipud, F.torch_flipud),
+        (F.torch_rot180, F.torch_rot180),
+        (F.torch_rot90_cw, F.torch_rot90_ccw),
+        (F.torch_rot90_ccw, F.torch_rot90_cw),
+        (F.torch_transpose, F.torch_transpose),
+        (F.torch_transpose_rot90_cw, F.torch_rot90_ccw_transpose),
+        (F.torch_transpose_rot180, F.torch_rot180_transpose),
+        (F.torch_transpose_rot90_ccw, F.torch_rot90_cw_transpose),
     ]
+    if tta_mode == 8:
+        tta = tta[2:]
+    elif tta_mode == 4:
+        tta = tta[:3]
+    elif tta_mode == 0:
+        tta = []
+    else:
+        raise ValueError
 
     for i, (tiles_batch, coords_batch) in enumerate(tqdm(test_loader, desc="Predict")):
-        for augmentation in tta:
-            pred_batch = model(augmentation(tiles_batch).float().cuda())
+        pred_batch = model(tiles_batch.float().cuda())
+        for aug, deaug in tta:
+            # TODO decorator?
+            pred_batch += deaug(model(aug(tiles_batch.float().cuda())))
+        # Mean reduce
+        pred_batch /= len(tta) + 1
 
-            # Upscale if needed
-            if test_ds.scale_factor != 1:
-                pred_batch = interpolate(
-                    pred_batch, scale_factor=1 / test_ds.scale_factor
-                )
+        # Upscale if needed
+        if test_ds.scale_factor != 1:
+            pred_batch = interpolate(pred_batch, scale_factor=1 / test_ds.scale_factor)
 
-            if use_cuda_merger:
-                # Integrate in allocated CUDA tensor
-                # Integration adds weight to norm_mask, so no need to additionally normalize TTA
-                test_ds.merger.integrate_batch(
-                    batch=pred_batch, crop_coords=coords_batch
-                )
-            else:
-                # Or add in tiles
-                bs = len(pred_batch)
-                tiles[i * bs : (i + 1) * bs] += (
-                    pred_batch.cpu().squeeze() > threshold
-                ).type(torch.int8)
+        if use_cuda_merger:
+            # Integrate in allocated CUDA tensor
+            # Integration adds weight to norm_mask, so no need to additionally normalize TTA
+            test_ds.merger.integrate_batch(batch=pred_batch, crop_coords=coords_batch)
+        else:
+            # Or add in tiles
+            bs = len(pred_batch)
+            tiles[i * bs : (i + 1) * bs] += (
+                pred_batch.cpu().squeeze() > threshold
+            ).type(torch.int8)
 
     # Merge predicted tiles back and scale to the original image size
     if use_cuda_merger:
         test_ds.merger.merge_()
         if save_raw:
             path_merged = str(target_path / f"{test_ds.image_hash}.pt")
+            path_merged_norm_mask = str(
+                target_path / f"{test_ds.image_hash}_norm_map.pt"
+            )
             torch.save(test_ds.merger.image, path_merged)
+            torch.save(test_ds.merger.norm_mask, path_merged_norm_mask)
 
         test_ds.merger.threshold_(threshold)
         merged = test_ds.merger.image.cpu().numpy().squeeze().astype(np.uint8)
@@ -122,8 +137,6 @@ def inference_one(
         ]
 
     else:
-        # Leave major voting for now
-        tiles = tiles // len(tta)
         merged = test_ds.tiler.merge(tiles.numpy()[..., None]).squeeze()
 
     # Save raw predictions for possible ensemble
@@ -153,6 +166,9 @@ def inference_dir(
     tile_size: int,
     tile_step: int,
     use_cuda_merger: bool = True,
+    save_raw: bool = False,  # works only with cuda merger now
+    tta_mode: int = 8,
+    weight: str = "pyramid",
 ):
     test_path = Path(test_path)
     target_path = Path(target_path)
@@ -170,6 +186,9 @@ def inference_dir(
             tile_size=tile_size,
             tile_step=tile_step,
             use_cuda_merger=use_cuda_merger,
+            save_raw=save_raw,
+            tta_mode=tta_mode,
+            weight=weight,
         )
         rle_encodings.append(rle)
 
@@ -203,6 +222,7 @@ def main():
         default=4,
         type=int,
     )
+    parser.add_argument("--tta", default=8, choices=[0, 4, 8], type=int)
 
     parser.add_argument(
         "--use_cuda_merger",
@@ -212,7 +232,7 @@ def main():
     )
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--tile_size", help="Tile size", default=256, type=int)
-    parser.add_argument("--tile_step", help="Tile step", default=224, type=int)
+    parser.add_argument("--tile_step", help="Tile step", default=192, type=int)
     parser.add_argument("--device", "-d", help="Device", default=2, type=int)
 
     args = parser.parse_args()
@@ -263,6 +283,7 @@ def main():
         tile_step=args.tile_step,
         tile_size=args.tile_size,
         use_cuda_merger=args.use_cuda_merger,
+        tta_mode=args.tta,
     )
 
 
