@@ -12,61 +12,73 @@ from pytorch_toolbelt.inference.tiles import ImageSlicer
 from rasterio.enums import Resampling
 from rasterio.windows import Window
 from torch import Tensor as T
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, SubsetRandomSampler
 
 Array = np.ndarray
+PathT = Union[Path, str]
+
+
+def get_file_paths(
+    path: PathT = "../data/hubmap-256x256/",
+    use_ids: Tuple[int] = (0, 1, 2, 3, 4, 5, 6, 7),
+) -> Tuple[List[Path], List[Path]]:
+    """
+    Get lists of paths to training images and masks
+    :param path: path to the data
+    :param use_ids: ids to use
+    :return:
+    """
+    path = Path(path)
+    unique_ids = sorted(
+        set(str(p).split("/")[-1].split("_")[0] for p in (path / "train").iterdir())
+    )
+
+    images = sorted(
+        [p for i in use_ids for p in (path / "train").glob(f"{unique_ids[i]}_*.png")]
+    )
+
+    masks = sorted(
+        [p for i in use_ids for p in (path / "masks").glob(f"{unique_ids[i]}_*.png")]
+    )
+
+    assert len(images) == len(masks)
+
+    return images, masks
 
 
 @dataclass
 class TrainDataset(Dataset):
+    images: List[Path]
+    masks: List[Path]
     mean: Tuple[float] = (0.485, 0.456, 0.406)
     std: Tuple[float] = (0.229, 0.224, 0.225)
-    path: Union[Path, str] = "../data/hubmap-256x256/"
-    use_ids: Tuple[int] = (0, 1, 2, 3, 4, 5, 6)
     transforms: Optional[Union[albu.BasicTransform, Any]] = None
 
     def __post_init__(self):
-        self.path = Path(self.path)
-        self.unique_ids = sorted(
-            set(
-                str(p).split("/")[-1].split("_")[0]
-                for p in (self.path / "train").iterdir()
-            )
-        )
 
-        self.images = sorted(
-            [
-                p
-                for i in self.use_ids
-                for p in (self.path / "train").glob(f"{self.unique_ids[i]}_*.png")
-            ]
-        )
-        self.masks = sorted(
-            [
-                p
-                for i in self.use_ids
-                for p in (self.path / "masks").glob(f"{self.unique_ids[i]}_*.png")
-            ]
-        )
+        assert len(self.images) == len(self.masks)
 
-        self.transforms = albu.Compose(
+        self.base_transforms = albu.Compose(
             [
-                albu.PadIfNeeded(256, 256, border_mode=cv2.BORDER_REFLECT_101),
-                self.transforms,
                 albu.Normalize(mean=self.mean, std=self.std),
                 ToTensorV2(),
             ]
         )
 
-        self.denormalize = Denormalize(mean=self.mean, std=self.std)
+        self.applied_transforms = albu.Compose(
+            [
+                self.transforms,
+                self.base_transforms,
+            ]
+        )
 
-        assert len(self.images) == len(self.masks)
+        self.denormalize = Denormalize(mean=self.mean, std=self.std)
 
     def __getitem__(self, i: int):
         image = np.array(Image.open(self.images[i]).convert("RGB"))
         mask = np.array(Image.open(self.masks[i]))
 
-        sample = self.transforms(image=image, mask=mask)
+        sample = self.applied_transforms(image=image, mask=mask)
         image, mask = sample["image"], sample["mask"]
 
         ret = {
@@ -80,6 +92,17 @@ class TrainDataset(Dataset):
 
     def __len__(self):
         return len(self.images)
+
+    # def train(self):
+    #     self.applied_transforms = albu.Compose(
+    #         [
+    #             self.transforms,
+    #             self.base_transforms,
+    #         ]
+    #     )
+    #
+    # def eval(self):
+    #     self.applied_transforms = self.base_transforms
 
 
 @dataclass

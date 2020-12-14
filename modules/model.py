@@ -22,6 +22,8 @@ def get_segmentation_model(
     :return:
     """
     arch = arch.lower()
+    if encoder_name == "en_resnet34":
+        encoder_weights = None
     if arch == "unet":
         return smp.Unet(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
@@ -50,40 +52,63 @@ def get_segmentation_model(
         return smp.DeepLabV3Plus(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
         )
+    else:
+        raise ValueError
 
 
-# https://github.com/yuhuixu1993/BNET/blob/main/classification/imagenet/models/resnet.py
-IMAGE_RGB_MEAN = [0.485, 0.456, 0.406]
-IMAGE_RGB_STD = [0.229, 0.224, 0.225]
+def batch_norm2en(module: nn.Module, kernel_size: int = 3) -> nn.Module:
+    """
+    Converts BatchNorm2d to EnBatchNorm2d
+    "Batch Normalization with Enhanced Linear Transformation"
+
+    Kudos to Ternaus
+    :param module: nn.Module to convert all BatchNorm2d
+    :param kernel_size: kernel size for grouped convolution in EnBatchNorm2d
+    :return:
+    """
+    module_output = module
+    if isinstance(module, torch.nn.modules.batchnorm.BatchNorm2d):
+        module_output = EnBatchNorm2d(
+            module.num_features, kernel_size=kernel_size, eps=module.eps
+        )
+        if module.affine:
+            with torch.no_grad():
+                module_output.bn.weight = module.weight
+                module_output.bn.bias = module.bias
+        module_output.bn.running_mean = module.running_mean
+        module_output.bn.running_var = module.running_var
+        module_output.bn.num_batches_tracked = module.num_batches_tracked
+        if hasattr(module, "qconfig"):
+            module_output.bn.qconfig = module.qconfig
+    for name, child in module.named_children():
+        module_output.add_module(name, batch_norm2en(child))
+    del module
+    return module_output
 
 
-class RGB(nn.Module):
-    def __init__(
-        self,
-        mean: Tuple[float, float, float] = (0.485, 0.456, 0.406),
-        std: Tuple[float, float, float] = (0.229, 0.224, 0.225),
-    ):
-        super(RGB, self).__init__()
-        self.register_buffer("mean", torch.zeros(1, 3, 1, 1))
-        self.register_buffer("std", torch.ones(1, 3, 1, 1))
-        self.mean.data = torch.tensor(mean).float().view(self.mean.shape)
-        self.std.data = torch.tensor(std).float().view(self.std.shape)
-
-    def forward(self, x):
-        x = (x - self.mean) / self.std
-        return x
+def batch_norm2en_resnet(model: nn.Module, kernel_size: int = 3) -> None:
+    """
+    Converts inplace BatchNorm2d in ResNet-like encoder of a model
+    :param model:
+    :param kernel_size:
+    :return:
+    """
+    model.encoder.layer1 = batch_norm2en(model.encoder.layer1, kernel_size=kernel_size)
+    model.encoder.layer2 = batch_norm2en(model.encoder.layer2, kernel_size=kernel_size)
+    model.encoder.layer3 = batch_norm2en(model.encoder.layer3, kernel_size=kernel_size)
+    model.encoder.layer4 = batch_norm2en(model.encoder.layer4, kernel_size=kernel_size)
 
 
 # Batch Normalization with Enhanced Linear Transformation
 class EnBatchNorm2d(nn.Module):
-    def __init__(self, in_channel, k=3, eps=1e-5):
+    def __init__(self, in_channel, kernel_size: int = 3, eps: float = 1e-5):
         super(EnBatchNorm2d, self).__init__()
-        self.bn = nn.BatchNorm2d(in_channel, eps=1e-5, affine=False)
+        self.bn = nn.BatchNorm2d(in_channel, eps=eps, affine=False)
         self.conv = nn.Conv2d(
             in_channel,
             in_channel,
-            kernel_size=k,
-            padding=(k - 1) // 2,
+            kernel_size=kernel_size,
+            padding=(kernel_size - 1) // 2,
             groups=in_channel,
             bias=True,
         )
@@ -178,17 +203,34 @@ class EnBasic(nn.Module):
         return z
 
 
-class EnResNet34(nn.Module):
-    def __init__(self, num_class=1000):
-        super(EnResNet34, self).__init__()
+class EnResNet34(nn.Module, smp.encoders._base.EncoderMixin):
+    def __init__(self, kernel_size_first=7, **kwargs):
+        super().__init__()
+
+        # A number of channels for each encoder feature tensor, list of integers
+        self._out_channels: List[int] = [3, 64, 64, 128, 256, 512]
+
+        # A number of stages in decoder (in other words number of downsampling operations), integer
+        # use in in forward pass to reduce number of returning features
+        self._depth: int = 5
+
+        # Default number of input channels in first Conv2d layer for encoder (usually 3)
+        self._in_channels: int = 3
 
         self.block0 = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=7, padding=3, stride=2, bias=False),
+            nn.Conv2d(
+                3,
+                64,
+                kernel_size=kernel_size_first,
+                padding=kernel_size_first // 2,
+                stride=2,
+                bias=False,
+            ),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
         )
         self.block1 = nn.Sequential(
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             EnBasic(
                 64,
                 64,
@@ -272,21 +314,45 @@ class EnResNet34(nn.Module):
                 for i in range(1, 3)
             ],
         )
-        self.logit = nn.Linear(512, num_class)
-        self.rgb = RGB()
 
-    def forward(self, x):
-        batch_size = len(x)
-        x = self.rgb(x)
+    def forward(self, x) -> List[Tensor]:
+        """Produce list of features of different spatial resolutions, each feature is a 4D torch.tensor of
+        shape NCHW (features should be sorted in descending order according to spatial resolution, starting
+        with resolution same as input `x` tensor).
 
-        x = self.block0(x)
-        x = self.block1(x)
-        x = self.block2(x)
-        x = self.block3(x)
-        x = self.block4(x)
-        x = F.adaptive_avg_pool2d(x, 1).reshape(batch_size, -1)
-        logit = self.logit(x)
-        return logit
+        Input: `x` with shape (1, 3, 64, 64)
+        Output: [f0, f1, f2, f3, f4, f5] - features with corresponding shapes
+                [(1, 3, 64, 64), (1, 64, 32, 32), (1, 128, 16, 16), (1, 256, 8, 8),
+                (1, 512, 4, 4), (1, 1024, 2, 2)] (C - dim may differ)
+
+        also should support number of features according to specified depth, e.g. if depth = 5,
+        number of feature tensors = 6 (one with same resolution as input and 5 downsampled),
+        depth = 3 -> number of feature tensors = 4 (one with same resolution as input and 3 downsampled).
+        """
+        stages = [
+            nn.Identity(),
+            self.block0,
+            self.block1,
+            self.block2,
+            self.block3,
+            self.block4,
+        ]
+
+        features = []
+        for i in range(self._depth + 1):
+            x = stages[i](x)
+            features.append(x)
+
+        return features
+
+
+smp.encoders.encoders["en_resnet34"] = {
+    "encoder": EnResNet34,
+    "params": {
+        "kernel_size_first": 7,
+    },
+    "pretrained_settings": {},
+}
 
 
 class UneXt50(nn.Module):

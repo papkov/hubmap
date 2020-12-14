@@ -7,7 +7,7 @@ import segmentation_models_pytorch as smp
 from adabelief_pytorch import AdaBelief
 from catalyst import utils as cutils
 from catalyst.contrib.callbacks import WandbLogger
-from catalyst.contrib.nn import DiceLoss, IoULoss, Lookahead, RAdam
+from catalyst.contrib.nn import DiceLoss, IoULoss, Lookahead, LovaszLossBinary, RAdam
 from catalyst.dl import (
     CriterionCallback,
     DiceCallback,
@@ -19,11 +19,12 @@ from catalyst.dl import (
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 from pytorch_toolbelt.utils.random import set_manual_seed
+from sklearn.model_selection import train_test_split
 from torch import nn, optim
 from torch.utils.data import DataLoader
 
 from modules import dataset as D
-from modules.model import get_segmentation_model
+from modules.model import batch_norm2en_resnet, get_segmentation_model
 from modules.util import set_device_id
 
 
@@ -37,21 +38,41 @@ def main(cfg: DictConfig):
     cwd = Path(get_original_cwd())
     # wandb.init(project=cfg.project, config=cfg)
 
+    train_images, train_masks = D.get_file_paths(
+        path=(cwd / cfg.data.path), use_ids=cfg.data.train_ids
+    )
+    if cfg.data.valid_ids:
+        print(f"Use ids {cfg.data.valid_ids} for validation")
+        valid_images, valid_masks = D.get_file_paths(
+            path=(cwd / cfg.data.path), use_ids=cfg.data.valid_ids
+        )
+    else:
+        print("Use random stratified split")
+        hashes = [str(img).split("/")[-1].split("_")[0] for img in train_images]
+        train_images, valid_images, train_masks, valid_masks = train_test_split(
+            train_images,
+            train_masks,
+            test_size=cfg.data.valid_split,
+            random_state=cfg.seed,
+            stratify=hashes,
+        )
+
     # Datasets
     train_ds = D.TrainDataset(
-        path=cwd / cfg.data.path,
+        images=train_images,
+        masks=train_masks,
         mean=cfg.data.mean,
         std=cfg.data.std,
-        use_ids=cfg.data.train_ids,
         transforms=D.get_training_augmentations(),
     )
     valid_ds = D.TrainDataset(
-        path=cwd / cfg.data.path,
+        images=valid_images,
+        masks=valid_masks,
         mean=cfg.data.mean,
         std=cfg.data.std,
-        use_ids=cfg.data.valid_ids,
         transforms=None,
     )
+    print("train:", len(train_ds), "valid:", len(valid_ds))
 
     # Data loaders
     data_loaders = OrderedDict(
@@ -79,6 +100,11 @@ def main(cfg: DictConfig):
         classes=1,
     )
 
+    # Convert Batch Norm layers
+    if cfg.model.convert_bn:
+        print("Converting BatchNorm2d")
+        batch_norm2en_resnet(model)
+
     # Optimization
     # optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
@@ -105,21 +131,45 @@ def main(cfg: DictConfig):
     else:
         optimizer = base_optimizer
 
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, **cfg.scheduler.plateau)
+    # Select scheduler
+    # TODO getter
+    if cfg.scheduler.type == "cosine":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=cfg.train.num_epochs, eta_min=1e-8
+        )
+    elif cfg.scheduler.type == "plateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, **cfg.scheduler.plateau
+        )
+    else:
+        raise ValueError
 
-    criterion = {"dice": DiceLoss(), "iou": IoULoss(), "bce": nn.BCEWithLogitsLoss()}
+    criterion = {
+        "dice": DiceLoss(),
+        "iou": IoULoss(),
+        "bce": nn.BCEWithLogitsLoss(),
+        "lovasz": LovaszLossBinary(),
+    }
 
     callbacks = [
         # Each criterion is calculated separately.
         CriterionCallback(input_key="mask", prefix="loss_dice", criterion_key="dice"),
         CriterionCallback(input_key="mask", prefix="loss_iou", criterion_key="iou"),
         CriterionCallback(input_key="mask", prefix="loss_bce", criterion_key="bce"),
+        CriterionCallback(
+            input_key="mask", prefix="loss_lovasz", criterion_key="lovasz"
+        ),
         # And only then we aggregate everything into one loss.
         MetricAggregationCallback(
             prefix="loss",
             mode="weighted_sum",  # can be "sum", "weighted_sum" or "mean"
             # because we want weighted sum, we need to add scale for each loss
-            metrics={"loss_dice": 1.0, "loss_iou": 0.5, "loss_bce": 0.5},
+            metrics={
+                "loss_dice": cfg.loss.dice,
+                "loss_iou": cfg.loss.iou,
+                "loss_bce": cfg.loss.bce,
+                "loss_lovasz": cfg.loss.lovasz,
+            },
         ),
         # metrics
         DiceCallback(input_key="mask"),
