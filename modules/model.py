@@ -11,13 +11,17 @@ def get_segmentation_model(
     arch: str,
     encoder_name: str,
     encoder_weights: Optional[str] = "imagenet",
-    **kwargs: Any
+    checkpoint_path: Optional[str] = None,
+    convert_bn: bool = False,
+    **kwargs: Any,
 ) -> nn.Module:
     """
     Fetch segmentation model by its name
     :param arch:
     :param encoder_name:
     :param encoder_weights:
+    :param checkpoint_path:
+    :param convert_bn:
     :param kwargs:
     :return:
     """
@@ -25,35 +29,50 @@ def get_segmentation_model(
     if encoder_name == "en_resnet34":
         encoder_weights = None
     if arch == "unet":
-        return smp.Unet(
+        model = smp.Unet(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
         )
     elif arch == "unetplusplus" or arch == "unet++":
-        return smp.UnetPlusPlus(
+        model = smp.UnetPlusPlus(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
         )
     elif arch == "linknet":
-        return smp.Linknet(
+        model = smp.Linknet(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
         )
     elif arch == "pspnet":
-        return smp.PSPNet(
+        model = smp.PSPNet(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
         )
     elif arch == "pan":
-        return smp.PAN(
+        model = smp.PAN(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
         )
     elif arch == "deeplabv3":
-        return smp.DeepLabV3(
+        model = smp.DeepLabV3(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
         )
     elif arch == "deeplabv3plus" or arch == "deeplabv3+":
-        return smp.DeepLabV3Plus(
+        model = smp.DeepLabV3Plus(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
         )
     else:
         raise ValueError
+
+    if convert_bn:
+        print("Converting BatchNorm2d")
+        batch_norm2en_resnet(model)
+
+    if checkpoint_path is not None:
+        # Load checkpoint
+        print(f"\nLoading checkpoint {str(checkpoint_path)}")
+        state_dict = torch.load(checkpoint_path, map_location=torch.device("cpu"))[
+            "model_state_dict"
+        ]
+        model.load_state_dict(state_dict)
+        del state_dict
+
+    return model
 
 
 def batch_norm2en(module: nn.Module, kernel_size: int = 3) -> nn.Module:
@@ -441,7 +460,7 @@ class UnetBlock(nn.Module):
         nf: int = None,
         blur: bool = False,
         self_attention: bool = False,
-        **kwargs
+        **kwargs,
     ):
         super().__init__()
         self.shuf = PixelShuffle_ICNR(up_in_c, up_in_c // 2, blur=blur, **kwargs)

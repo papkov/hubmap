@@ -230,21 +230,13 @@ def main():
         arch=cfg.model.arch,
         encoder_name=cfg.model.encoder_name,
         encoder_weights=None,
+        checkpoint_path=path / cfg.train.logdir / "checkpoints/best.pth",
+        convert_bn=cfg.model.convert_bn,
         classes=1,
     )
-
-    # Load checkpoint
-    path_ckpt = path / cfg.train.logdir / "checkpoints/best.pth"
-    print(f"\nLoading checkpoint {str(path_ckpt)}")
-    state_dict = torch.load(path_ckpt, map_location=torch.device("cpu"))[
-        "model_state_dict"
-    ]
-    model.load_state_dict(state_dict)
-    model = model.to(device)
     model = model.float()
+    model = model.to(device)
     model.eval()
-    del state_dict
-    gc.collect()
 
     return inference_dir(
         test_path=args.test_path,

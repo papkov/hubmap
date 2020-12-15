@@ -9,8 +9,8 @@ device: 0
 
 data:
   path: data/hubmap-256x256/
-  train_ids: [0, 1, 2, 3, 4, 5, 6, 7]
-  valid_ids: []
+  train_ids: [0, 1, 2, 3, 4, 5, 6]
+  valid_ids: [7]
   valid_split: 0.1
 #  mean: [0.65459856, 0.48386562, 0.69428385]
 #  std: [0.15167958, 0.23584107, 0.13146145]
@@ -27,7 +27,7 @@ model:
   encoder_name: se_resnext50_32x4d
 #  encoder_name: en_resnet34
   encoder_weights: imagenet
-  convert_bn: True
+  convert_bn: False
 
 optim:
   name: radam

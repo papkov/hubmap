@@ -1,13 +1,16 @@
 import os
 from collections import OrderedDict
 from pathlib import Path
+from typing import List, Tuple
 
 import hydra
+import numpy as np
 import segmentation_models_pytorch as smp
+import torch
 from adabelief_pytorch import AdaBelief
 from catalyst import utils as cutils
 from catalyst.contrib.callbacks import WandbLogger
-from catalyst.contrib.nn import DiceLoss, IoULoss, Lookahead, LovaszLossBinary, RAdam
+from catalyst.contrib.nn import DiceLoss, IoULoss, Lookahead, RAdam
 from catalyst.dl import (
     CriterionCallback,
     DiceCallback,
@@ -16,16 +19,36 @@ from catalyst.dl import (
     MetricAggregationCallback,
     SupervisedRunner,
 )
+from catalyst.metrics import dice
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 from pytorch_toolbelt.utils.random import set_manual_seed
 from sklearn.model_selection import train_test_split
-from torch import nn, optim
+from torch import nn, optim, sigmoid
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from modules import dataset as D
+from modules.lovasz import LovaszLossBinary
 from modules.model import batch_norm2en_resnet, get_segmentation_model
 from modules.util import set_device_id
+
+
+@torch.no_grad()
+def find_dice_threshold(model: nn.Module, loader: DataLoader, device: str = "cuda"):
+    dice_th_range = np.arange(0.1, 0.7, 0.01)
+    masks = []
+    preds = []
+    for batch in tqdm(loader):
+        preds.append(model(batch["image"].to(device)).cpu())
+        masks.append(batch["mask"])
+    masks = torch.cat(masks, dim=0)
+    preds = torch.cat(preds, dim=0)
+    dices = []
+    for th in tqdm(dice_th_range):
+        dices.append(dice(preds, masks, threshold=th).item())
+    best_th = dice_th_range[np.argmax(dices)]
+    return best_th, (dice_th_range, dices)
 
 
 @hydra.main(config_path="config", config_name="default.yaml")
@@ -98,12 +121,8 @@ def main(cfg: DictConfig):
         encoder_name=cfg.model.encoder_name,
         encoder_weights=cfg.model.encoder_weights,
         classes=1,
+        convert_bn=cfg.model.convert_bn,
     )
-
-    # Convert Batch Norm layers
-    if cfg.model.convert_bn:
-        print("Converting BatchNorm2d")
-        batch_norm2en_resnet(model)
 
     # Optimization
     # optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -194,6 +213,12 @@ def main(cfg: DictConfig):
         main_metric=cfg.train.main_metric,
         minimize_metric=False,
     )
+
+    # Find optimal threshold for dice score
+    best_th, dices = find_dice_threshold(model, data_loaders["valid"])
+    np.save("dices.npy", dices)
+    OmegaConf.update(cfg, "threshold", float(best_th))
+    OmegaConf.save(cfg, ".hydra/config.yaml")
 
     return
 
