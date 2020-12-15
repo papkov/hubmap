@@ -36,7 +36,7 @@ def inference_one(
     save_raw: bool = False,
     tta_mode: int = 8,
     weight: str = "pyramid",
-    device: str = "gpu",
+    device: str = "cuda",
 ):
     image_path = Path(image_path)
     target_path = Path(target_path)
@@ -88,25 +88,47 @@ def inference_one(
     else:
         raise ValueError
 
-    for i, (tiles_batch, coords_batch) in enumerate(tqdm(test_loader, desc="Predict")):
-        pred_batch = model(tiles_batch.float().cuda())
+    for i, batch in enumerate(tqdm(test_loader, desc="Predict")):
+        tiles_batch = batch["image"]
+
+        # Allocate zeros
+        bs = tiles_batch.shape[0]
+        pred_batch = (
+            torch.empty(bs, 1, tile_size, tile_size)
+            .fill_(merger.default_value)
+            .float()
+            .to(device)
+        )
+
+        # Predict only non-empty batches
+        if not np.any(batch["within_any"].numpy()):
+            continue
+
+        to_predict = torch.tensor(np.argwhere(batch["within_any"].numpy()))[..., 0]
+
+        # Predict only tiles within structure
+        tiles_batch = tiles_batch[to_predict].float().to(device)
+        pred_batch[to_predict] = model(tiles_batch)
+
+        # Run TTA, if any
         for aug, deaug in tta:
             # TODO decorator?
-            pred_batch += deaug(model(aug(tiles_batch.float().cuda())))
+            pred_batch[to_predict] += deaug(model(aug(tiles_batch)))
         # Mean reduce
-        pred_batch /= len(tta) + 1
+        pred_batch[to_predict] /= len(tta) + 1
 
         # Upscale if needed
         if test_ds.scale_factor != 1:
             pred_batch = interpolate(pred_batch, scale_factor=1 / test_ds.scale_factor)
 
-        merger.integrate_batch(batch=pred_batch, crop_coords=coords_batch)
+        merger.integrate_batch(batch=pred_batch, crop_coords=batch["crop"])
 
     # Merge predicted tiles back
     merger.merge_()
     if save_raw:
         path_merged = str(target_path / f"{test_ds.image_hash}.pt")
         path_merged_norm_mask = str(target_path / f"{test_ds.image_hash}_norm_map.pt")
+        print(f"Save to {path_merged}")
         torch.save(merger.image, path_merged)
         torch.save(merger.norm_mask, path_merged_norm_mask)
 
@@ -144,6 +166,7 @@ def inference_dir(
     tile_step: int,
     save_raw: bool = False,
     tta_mode: int = 8,
+    threshold: float = 0.5,
     weight: str = "pyramid",
     device: str = "gpu",
 ):
@@ -165,6 +188,7 @@ def inference_dir(
             save_raw=save_raw,
             tta_mode=tta_mode,
             weight=weight,
+            threshold=threshold,
             device=device,
         )
         rle_encodings.append(rle)
@@ -199,12 +223,19 @@ def main():
         default=4,
         type=int,
     )
-    parser.add_argument("--tta", default=8, choices=[0, 4, 8], type=int)
+    parser.add_argument("--tta", default=4, choices=[0, 4, 8], type=int)
 
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--tile_size", help="Tile size", default=256, type=int)
     parser.add_argument("--tile_step", help="Tile step", default=192, type=int)
     parser.add_argument("--device", "-d", help="Device", default=2, type=int)
+    parser.add_argument(
+        "--threshold",
+        "-t",
+        help="Threshold for prediction binarization",
+        default=0.5,
+        type=float,
+    )
     parser.add_argument("--save_raw", action="store_true")
 
     args = parser.parse_args()
@@ -231,7 +262,9 @@ def main():
         encoder_name=cfg.model.encoder_name,
         encoder_weights=None,
         checkpoint_path=path / cfg.train.logdir / "checkpoints/best.pth",
-        convert_bn=cfg.model.convert_bn,
+        convert_bn=False
+        if OmegaConf.is_missing(cfg.model, "convert_bn")
+        else cfg.model.convert_bn,
         classes=1,
     )
     model = model.float()
@@ -249,6 +282,7 @@ def main():
         device=device,
         save_raw=args.save_raw,
         tta_mode=args.tta,
+        threshold=args.threshold,
     )
 
 

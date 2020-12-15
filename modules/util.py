@@ -81,3 +81,14 @@ def set_device_id(device_id: Optional[Union[int, str]] = None) -> str:
         return "cuda"
     else:
         return "cpu"
+
+
+def polygon_area(x, y):
+    """
+    Shoelace formula to calculate polygon area
+    https://stackoverflow.com/a/30408825
+    :param x:
+    :param y:
+    :return:
+    """
+    return 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))

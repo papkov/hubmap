@@ -1,9 +1,13 @@
+import json
 from dataclasses import dataclass
+from itertools import product
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import albumentations as albu
 import cv2
+import matplotlib.path as mpath
+import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
 from albumentations.pytorch.transforms import ToTensorV2
@@ -114,10 +118,19 @@ class TiffFile(Dataset):
     random_crop: bool = False
     num_threads: Union[str, int] = "all_cpus"
     weight: str = "pyramid"
+    anatomical_structure: Optional[List[Dict[str, Any]]] = None
+    filter_crops: bool = True
 
     def __post_init__(self):
         # Get image hash name
         self.image_hash = self.path.split("/")[-1].split(".")[0]
+
+        # Read anatomical structure
+        if self.anatomical_structure is None:
+            with open(
+                str(self.path).replace(".tiff", "-anatomical-structure.json"), "r"
+            ) as f:
+                self.anatomical_structure = json.load(f)
 
         # Open TIFF image
         identity = rasterio.Affine(1, 0, 0, 0, 1, 0)
@@ -133,17 +146,33 @@ class TiffFile(Dataset):
             weight=self.weight,
         )
 
-    def __len__(self):
-        return len(self.tiler.crops)
+        # Check and prepare all the crops
+        self.crops = []
+        self.batch_crops = []
+        self.within_any = []
+        self.within_region = []
+        for i, crop in enumerate(self.tiler.crops):
+            (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.tiler.crop_no_pad(
+                i, self.random_crop
+            )
+            within_any, within_region = self.is_within((iy0, iy1), (ix0, ix1))
+            if self.filter_crops:
+                if not within_any:
+                    continue
+            self.batch_crops.append(self.tiler.crops[i])
+            self.crops.append(((ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1)))
+            self.within_any.append(within_any)
+            self.within_region.append(within_region)
 
-    def __getitem__(self, i: int) -> Array:
-        x, y, tile_width, tile_height = self.tiler.crops[i]
-        (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.tiler.crop_no_pad(
-            i, self.random_crop
-        )
+    def __len__(self):
+        return len(self.crops)
+
+    def __getitem__(self, i: int) -> Dict[str, Any]:
+        (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.crops[i]
         # print((x0, x1, y0, y1), (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1))
 
         # Allocate tile
+        tile_width, tile_height = self.tiler.tile_size
         tile = np.zeros((tile_width, tile_height, self.image.count), dtype=np.uint8)
 
         # Read window
@@ -167,7 +196,48 @@ class TiffFile(Dataset):
             ),
             interpolation=cv2.INTER_AREA,
         )
-        return tile
+
+        ret = {
+            "image": tile,
+            "crop": self.batch_crops[i],
+            "tile_crop": (ix0, ix1, iy0, iy1, tx0, tx1, ty0, ty1),
+            "within_any": self.within_any[i],
+        }
+        ret.update(self.within_region[i])
+        return ret
+
+    def plot_structure(self):
+        for region in self.anatomical_structure:
+            coords = np.array(region["geometry"]["coordinates"][0])
+            plt.plot(
+                coords[:, 0],
+                coords[:, 1],
+                label=region["properties"]["classification"]["name"],
+            )
+        plt.gca().invert_yaxis()
+        plt.legend()
+
+    def is_within(self, y: Tuple[int, int], x: Tuple[int, int]):
+        """
+        Check if tile corners are within anatomical structure
+        :params y: tuple (y0, y1)
+        :params x: tuple (x0, x1)
+        :return: (bool within_any, dict within_region)
+        """
+        points = list(product(x, y))
+        paths = {}
+        for i, region in enumerate(self.anatomical_structure):
+            coords = np.array(region["geometry"]["coordinates"][0])
+            # coords[:, 1] = self.tiler.image_height - coords[:, 1]  # turn around to align image
+            region = region["properties"]["classification"]["name"]
+            paths[f"{region}_{i}"] = mpath.Path(coords)
+        # if any corner is within the structure, consider the whole tile within
+        within_region = {
+            region: np.any(path.contains_points(points))
+            for region, path in paths.items()
+        }
+        within_any = np.any(list(within_region.values()))
+        return within_any, within_region
 
 
 @dataclass
@@ -178,41 +248,19 @@ class TestDataset(TiffFile):
 
     def __post_init__(self):
         super().__post_init__()
-
-        if self.cache_tiles:
-            # Read full-sized image
-            image = self.image.read(
-                out_shape=(
-                    self.image.count,
-                    int(self.image.height * self.scale_factor),
-                    int(self.image.width * self.scale_factor),
-                ),
-                resampling=Resampling.bilinear,
-            )
-            if image.shape[-1] != 3:
-                image = np.moveaxis(image, 0, -1)
-            self.tiles = [tile for tile in self.tiles.split(image)]
-        else:
-            self.tiles = None
-
         # Transforms
         self.transforms = albu.Compose(
             [albu.Normalize(mean=self.mean, std=self.std), ToTensorV2()]
         )
         self.denormalize = Denormalize(mean=self.mean, std=self.std)
 
-    def __getitem__(self, i: int) -> Tuple[T, Array]:
-        crop = self.tiler.crops[i]
-        if self.cache_tiles:
-            tile = self.tiles[i]
-        else:
-            tile = super(TestDataset, self).__getitem__(i)
-
-        tile = self.transforms(image=tile)["image"]
-        return tile, crop
+    def __getitem__(self, i: int) -> Dict[str, Any]:
+        ret = super().__getitem__(i)
+        ret["image"] = self.transforms(image=ret["image"])["image"]
+        return ret
 
     def __len__(self) -> int:
-        return len(self.tiler.crops)
+        return len(self.crops)
 
 
 def get_training_augmentations():
