@@ -199,8 +199,10 @@ def main(cfg: DictConfig):
             cutils.unpack_checkpoint(
                 checkpoint=checkpoint,
                 model=model,
-                optimizer=optimizer if resume_cfg.optim.name == cfg.optim.name else None,
-                criterion=criterion
+                optimizer=optimizer
+                if resume_cfg.optim.name == cfg.optim.name
+                else None,
+                criterion=criterion,
             )
         else:
             raise ValueError("Nothing to resume, checkpoint missing")
