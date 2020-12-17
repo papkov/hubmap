@@ -9,6 +9,9 @@ device: 0
 
 data:
   path: data/hubmap-256x256/
+  scale_factor: 0.25
+  tile_size: 1024  # in original scale
+  tile_step: 896
   train_ids: [0, 1, 2, 3, 4, 5, 6]
   valid_ids: [7]  # Should always be a list
   valid_split: 0.1  # Use when valid_ids is empty
@@ -43,7 +46,7 @@ loss:
   lovasz: 0
 
 scheduler:
-  type: cosine
+  type: plateau
   plateau:
     patience: 10
     factor: 0.1

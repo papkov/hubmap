@@ -112,8 +112,8 @@ class TrainDataset(Dataset):
 @dataclass
 class TiffFile(Dataset):
     path: Union[Path, str]
-    tile_size: Union[Tuple[int, int], int] = 256
-    tile_step: Union[Tuple[int, int], int] = 192
+    tile_size: Union[Tuple[int, int], int] = 1024
+    tile_step: Union[Tuple[int, int], int] = 896
     scale_factor: float = 1
     random_crop: bool = False
     num_threads: Union[str, int] = "all_cpus"
@@ -141,8 +141,8 @@ class TiffFile(Dataset):
         # Set up tiler
         self.tiler = ImageSlicer(
             self.image.shape,
-            tile_size=int(self.tile_size / self.scale_factor),
-            tile_step=int(self.tile_step / self.scale_factor),
+            tile_size=self.tile_size,
+            tile_step=self.tile_step,
             weight=self.weight,
         )
 

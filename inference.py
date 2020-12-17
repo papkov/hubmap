@@ -227,8 +227,8 @@ def main():
     parser.add_argument("--tta", default=4, choices=[0, 4, 8], type=int)
 
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
-    parser.add_argument("--tile_size", help="Tile size", default=256, type=int)
-    parser.add_argument("--tile_step", help="Tile step", default=192, type=int)
+    parser.add_argument("--tile_size", help="Tile size", default=1024, type=int)
+    parser.add_argument("--tile_step", help="Tile step", default=896, type=int)
     parser.add_argument("--device", "-d", help="Device", default=2, type=int)
     parser.add_argument(
         "--threshold",

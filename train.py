@@ -47,10 +47,10 @@ def find_dice_threshold(model: nn.Module, loader: DataLoader, device: str = "cud
     masks = torch.cat(masks, dim=0)
     preds = torch.cat(preds, dim=0)
     for th in tqdm(dice_th_range):
-        # dices.append(dice(preds, masks, threshold=th).item())
-        dices.append(
-            np.mean([dice(p, m, threshold=th).item() for p, m in zip(preds, masks)])
-        )
+        dices.append(dice(preds, masks, threshold=th).item())
+        # dices.append(
+        #     np.mean([dice(p, m, threshold=th).item() for p, m in zip(preds, masks)])
+        # )
     best_th = dice_th_range[np.argmax(dices)]
     return best_th, (dice_th_range, dices)
 
@@ -61,7 +61,8 @@ def main(cfg: DictConfig):
     cwd = Path(get_original_cwd())
 
     # overwrite config if continue training from checkpoint
-    if not OmegaConf.is_missing(cfg, "resume"):
+    resume_cfg = None
+    if "resume" in cfg:
         cfg_path = cwd / cfg.resume / ".hydra/config.yaml"
         print(f"Continue from: {cfg.resume}")
         # Overwrite everything except device
@@ -188,7 +189,7 @@ def main(cfg: DictConfig):
     }
 
     # Load states if resuming training
-    if not OmegaConf.is_missing(cfg, "resume"):
+    if "resume" in cfg:
         checkpoint_path = (
             cwd / cfg.resume / cfg.train.logdir / "checkpoints/best_full.pth"
         )
@@ -198,9 +199,8 @@ def main(cfg: DictConfig):
             cutils.unpack_checkpoint(
                 checkpoint=checkpoint,
                 model=model,
-                # TODO continue with sane optimizer params
-                # optimizer=optimizer,
-                # criterion=criterion
+                optimizer=optimizer if resume_cfg.optim.name == cfg.optim.name else None,
+                criterion=criterion
             )
         else:
             raise ValueError("Nothing to resume, checkpoint missing")
@@ -292,9 +292,9 @@ def main(cfg: DictConfig):
             target_path=Path("."),
             cfg=cfg,
             model=model,
-            scale_factor=0.25,  # TODO remove hardcode
-            tile_size=256,
-            tile_step=192,
+            scale_factor=cfg.data.scale_factor,
+            tile_size=cfg.data.tile_size,
+            tile_step=cfg.data.tile_step,
             threshold=best_th,
             save_raw=True,
             tta_mode=0,
