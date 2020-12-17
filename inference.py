@@ -2,7 +2,7 @@ import argparse
 import gc
 from datetime import datetime
 from pathlib import Path
-from typing import Union
+from typing import Any, Dict, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -37,7 +37,7 @@ def inference_one(
     tta_mode: int = 8,
     weight: str = "pyramid",
     device: str = "cuda",
-):
+) -> Tuple[Dict[str, Any], Tuple[int, int]]:
     image_path = Path(image_path)
     target_path = Path(target_path)
 
@@ -148,12 +148,13 @@ def inference_one(
         "id": test_ds.image_hash,
         "predicted": rle_encode_less_memory(merged),
     }
+    target_shape = merged.shape
 
     del test_ds, test_loader, merged
     gc.collect()
     torch.cuda.empty_cache()
 
-    return rle
+    return rle, target_shape
 
 
 def inference_dir(
@@ -177,7 +178,7 @@ def inference_dir(
     rle_encodings = []
     for i, image_path in enumerate(images):
         print(f"\nPredict image {image_path.as_posix()}")
-        rle = inference_one(
+        rle, shape = inference_one(
             image_path=image_path,
             target_path=target_path,
             cfg=cfg,

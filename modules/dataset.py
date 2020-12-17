@@ -25,7 +25,7 @@ PathT = Union[Path, str]
 def get_file_paths(
     path: PathT = "../data/hubmap-256x256/",
     use_ids: Tuple[int] = (0, 1, 2, 3, 4, 5, 6, 7),
-) -> Tuple[List[Path], List[Path]]:
+) -> Tuple[List[Path], List[Path], List[str]]:
     """
     Get lists of paths to training images and masks
     :param path: path to the data
@@ -47,7 +47,7 @@ def get_file_paths(
 
     assert len(images) == len(masks)
 
-    return images, masks
+    return images, masks, unique_ids
 
 
 @dataclass
@@ -244,7 +244,6 @@ class TiffFile(Dataset):
 class TestDataset(TiffFile):
     mean: Tuple[float] = (0.485, 0.456, 0.406)
     std: Tuple[float] = (0.229, 0.224, 0.225)
-    cache_tiles: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -268,36 +267,49 @@ def get_training_augmentations():
     https://www.kaggle.com/iafoss/hubmap-pytorch-fast-ai-starter
     :return: albumentation.Compose() of selected augmentation
     """
-    return albu.Compose(
+    transforms = albu.Compose(
         [
             albu.HorizontalFlip(),
             albu.VerticalFlip(),
             albu.RandomRotate90(),
-            albu.ShiftScaleRotate(
-                shift_limit=0.0625,
-                scale_limit=0.2,
-                rotate_limit=15,
-                p=0.9,
-                border_mode=cv2.BORDER_REFLECT,
-            ),
-            albu.OneOf(
-                [
-                    albu.OpticalDistortion(p=0.3),
-                    albu.GridDistortion(p=0.1),
-                    albu.IAAPiecewiseAffine(p=0.3),
-                ],
-                p=0.3,
-            ),
-            albu.OneOf(
-                [
-                    albu.HueSaturationValue(10, 15, 10),
-                    albu.CLAHE(clip_limit=2),
-                    albu.RandomBrightnessContrast(),
-                ],
-                p=0.3,
+            albu.RandomBrightnessContrast(brightness_limit=0.5, contrast_limit=0.5),
+            albu.HueSaturationValue(
+                hue_shift_limit=20, sat_shift_limit=50, val_shift_limit=40
             ),
         ]
     )
+    return transforms
+    # return albu.Compose(
+    #     [
+    #
+    #         albu.HorizontalFlip(),
+    #         albu.VerticalFlip(),
+    #         albu.RandomRotate90(),
+    #         albu.ShiftScaleRotate(
+    #             shift_limit=0.0625,
+    #             scale_limit=0.2,
+    #             rotate_limit=15,
+    #             p=0.9,
+    #             border_mode=cv2.BORDER_REFLECT,
+    #         ),
+    #         albu.OneOf(
+    #             [
+    #                 albu.OpticalDistortion(p=0.3),
+    #                 albu.GridDistortion(p=0.1),
+    #                 albu.IAAPiecewiseAffine(p=0.3),
+    #             ],
+    #             p=0.3,
+    #         ),
+    #         albu.OneOf(
+    #             [
+    #                 albu.HueSaturationValue(10, 15, 10),
+    #                 albu.CLAHE(clip_limit=2),
+    #                 albu.RandomBrightnessContrast(),
+    #             ],
+    #             p=0.3,
+    #         ),
+    #     ]
+    # )
 
 
 @dataclass

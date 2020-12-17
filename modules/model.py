@@ -28,6 +28,7 @@ def get_segmentation_model(
     arch = arch.lower()
     if encoder_name == "en_resnet34":
         encoder_weights = None
+
     if arch == "unet":
         model = smp.Unet(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
@@ -54,6 +55,10 @@ def get_segmentation_model(
         )
     elif arch == "deeplabv3plus" or arch == "deeplabv3+":
         model = smp.DeepLabV3Plus(
+            encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
+        )
+    elif arch == "manet":
+        model = smp.MAnet(
             encoder_name=encoder_name, encoder_weights=encoder_weights, **kwargs
         )
     else:
