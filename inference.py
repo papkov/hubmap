@@ -53,7 +53,7 @@ def inference_one(
 
     test_loader = DataLoader(
         test_ds,
-        batch_size=cfg.loader.valid_bs,
+        batch_size=1,  # just do it one by one
         num_workers=0,  # rasterio cannot be used with multiple workers
         shuffle=False,
         pin_memory=True,
@@ -94,7 +94,12 @@ def inference_one(
         # Allocate zeros
         bs = tiles_batch.shape[0]
         pred_batch = (
-            torch.empty(bs, 1, tile_size, tile_size)
+            torch.empty(
+                bs,
+                1,
+                int(tile_size * test_ds.scale_factor),
+                int(tile_size * test_ds.scale_factor),
+            )
             .fill_(merger.default_value)
             .float()
             .to(device)

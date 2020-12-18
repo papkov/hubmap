@@ -1,8 +1,7 @@
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, Dict
 
 import segmentation_models_pytorch as smp
 import torch
-from fastai.layers import *
 from torch import Tensor, nn
 from torch.nn import functional as F
 
@@ -12,7 +11,7 @@ def get_segmentation_model(
     encoder_name: str,
     encoder_weights: Optional[str] = "imagenet",
     checkpoint_path: Optional[str] = None,
-    convert_bn: bool = False,
+    convert_bn: Optional[str] = None,
     **kwargs: Any,
 ) -> nn.Module:
     """
@@ -64,8 +63,14 @@ def get_segmentation_model(
     else:
         raise ValueError
 
-    if convert_bn:
-        print("Converting BatchNorm2d")
+    if convert_bn == "instance":
+        print("Converting BatchNorm2d to InstanceNorm2d")
+        batch_norm2instance(model)
+    elif convert_bn == "group":
+        print("Converting BatchNorm2d to GroupNorm")
+        batch_norm2group(model)
+    elif convert_bn == "en":
+        print("Converting BatchNorm2d to EnBatchNorm2d")
         batch_norm2en_resnet(model)
 
     if checkpoint_path is not None:
@@ -80,34 +85,169 @@ def get_segmentation_model(
     return model
 
 
-def batch_norm2en(module: nn.Module, kernel_size: int = 3) -> nn.Module:
+@torch.no_grad()
+def batch_norm2other(
+    module: nn.Module, OtherNorm: type, *args: Optional[Tuple[Any, ...]], **kwargs: Optional[Dict[str, Any]]
+) -> nn.Module:
     """
-    Converts BatchNorm2d to EnBatchNorm2d
-    "Batch Normalization with Enhanced Linear Transformation"
+    Converts BatchNorm2d to GroupNorm, InstanceNorm2d or other class inherited from NormBase
+    TODO overwrite module attributes in kwargs and do not copy their values later
 
     Kudos to Ternaus
+    :param module: nn.Module to convert all BatchNorm2d in it
+    :param OtherNorm: type of normalization (e.g. InstanceNorm2d without brackets)
+    :return: module with converted BatchNorm2d
+    """
+    module_output = module
+    if isinstance(module, torch.nn.BatchNorm2d):
+        if OtherNorm == torch.nn.GroupNorm:
+            # Set num channels per group to 16 by default as suggested in the paper
+            kwargs_copy = kwargs.copy()  # Copy because of recursion
+            num_groups = kwargs_copy.pop(
+                "num_groups", max(1, module.num_features // 16)
+            )
+            channels_per_group = kwargs_copy.pop("channels_per_group")
+            if channels_per_group is not None:
+                # e.g. to assign one channel to each group
+                num_groups = module.num_features // channels_per_group
+
+            module_output = OtherNorm(
+                num_channels=module.num_features,
+                num_groups=min(num_groups, module.num_features),
+                affine=module.affine,
+                eps=module.eps,
+                *args,
+                **kwargs_copy,
+            )
+        elif issubclass(OtherNorm, torch.nn.modules.batchnorm._NormBase):
+            # Consider others inherited from NormBase
+            module_output = OtherNorm(
+                num_features=module.num_features,
+                affine=module.affine,
+                eps=module.eps,
+                track_running_stats=module.track_running_stats,
+                momentum=module.momentum,
+                *args,
+                **kwargs,
+            )
+        else:
+            raise ValueError(f"Class {OtherNorm} is not supported")
+        for constant in module.__constants__:
+            if not module.affine and constant in ("weight", "bias"):
+                continue
+            if hasattr(module_output, constant):
+                setattr(module_output, constant, getattr(module, constant))
+
+    for name, child in module.named_children():
+        module_output.add_module(
+            name, batch_norm2other(child, OtherNorm, *args, **kwargs)
+        )
+
+    del module
+    return module_output
+
+
+def batch_norm2instance(module: nn.Module) -> nn.Module:
+    """
+    Converts BatchNorm2d to InstanceNorm2d
+
+    Kudos to Ternaus
+    :param module: nn.Module to convert all BatchNorm2d
+    :return:
+    """
+    return batch_norm2other(module, torch.nn.InstanceNorm2d)
+    # module_output = module
+    # if isinstance(module, torch.nn.modules.batchnorm.BatchNorm2d):
+    #     module_output = torch.nn.InstanceNorm2d(
+    #         module.num_features,
+    #         module.eps,
+    #         module.momentum,
+    #         module.affine,
+    #         module.track_running_stats,
+    #     )
+    #     if module.affine:
+    #         with torch.no_grad():
+    #             module_output.weight = module.weight
+    #             module_output.bias = module.bias
+    #     module_output.running_mean = module.running_mean
+    #     module_output.running_var = module.running_var
+    #     module_output.num_batches_tracked = module.num_batches_tracked
+    #     if hasattr(module, "qconfig"):
+    #         module_output.qconfig = module.qconfig
+    # for name, child in module.named_children():
+    #     module_output.add_module(name, batch_norm2instance(child))
+    # del module
+    # return module_output
+
+
+def batch_norm2group(
+    module: nn.Module,
+    num_groups: Optional[int] = 32,
+    channels_per_group: Optional[int] = 1,
+) -> nn.Module:
+    """
+    Converts BatchNorm2d to GroupNorm
+
+    :param module: nn.Module to convert all BatchNorm2d
+    :param num_groups: for GroupNorm
+    :param channels_per_group: overwrites num_groups to set it proportional to num_channels (equal by default)
+    :return:
+    """
+    return batch_norm2other(
+        module,
+        torch.nn.GroupNorm,
+        num_groups=num_groups,
+        channels_per_group=channels_per_group,
+    )
+    #
+    # module_output = module
+    # if isinstance(module, torch.nn.modules.batchnorm.BatchNorm2d):
+    #     module_output = torch.nn.GroupNorm(
+    #         num_groups=num_groups,  # Default from paper, may try also module.num_features / 16
+    #         num_channels=module.num_features,
+    #         eps=module.eps,
+    #         affine=module.affine,
+    #     )
+    #     if module.affine:
+    #         with torch.no_grad():
+    #             module_output.weight = module.weight
+    #             module_output.bias = module.bias
+    #     if hasattr(module, "qconfig"):
+    #         module_output.qconfig = module.qconfig
+    # for name, child in module.named_children():
+    #     module_output.add_module(name, batch_norm2group(child))
+    # del module
+    # return module_output
+
+
+def batch_norm2en(module: nn.Module, kernel_size: int = 3) -> nn.Module:
+    """
+    Converts BatchNorm2d to BNet2d
+    "Batch Normalization with Enhanced Linear Transformation"
+
     :param module: nn.Module to convert all BatchNorm2d
     :param kernel_size: kernel size for grouped convolution in EnBatchNorm2d
     :return:
     """
-    module_output = module
-    if isinstance(module, torch.nn.modules.batchnorm.BatchNorm2d):
-        module_output = EnBatchNorm2d(
-            module.num_features, kernel_size=kernel_size, eps=module.eps
-        )
-        if module.affine:
-            with torch.no_grad():
-                module_output.bn.weight = module.weight
-                module_output.bn.bias = module.bias
-        module_output.bn.running_mean = module.running_mean
-        module_output.bn.running_var = module.running_var
-        module_output.bn.num_batches_tracked = module.num_batches_tracked
-        if hasattr(module, "qconfig"):
-            module_output.bn.qconfig = module.qconfig
-    for name, child in module.named_children():
-        module_output.add_module(name, batch_norm2en(child))
-    del module
-    return module_output
+    return batch_norm2other(module, BNet2d, kernel_size=kernel_size)
+    # module_output = module
+    # if isinstance(module, torch.nn.modules.batchnorm.BatchNorm2d):
+    #     module_output = EnBatchNorm2d(
+    #         module.num_features, kernel_size=kernel_size, eps=module.eps
+    #     )
+    #     if module.affine:
+    #         with torch.no_grad():
+    #             module_output.bn.weight = module.weight
+    #             module_output.bn.bias = module.bias
+    #     module_output.bn.running_mean = module.running_mean
+    #     module_output.bn.running_var = module.running_var
+    #     module_output.bn.num_batches_tracked = module.num_batches_tracked
+    #     if hasattr(module, "qconfig"):
+    #         module_output.bn.qconfig = module.qconfig
+    # for name, child in module.named_children():
+    #     module_output.add_module(name, batch_norm2en(child))
+    # del module
+    # return module_output
 
 
 def batch_norm2en_resnet(model: nn.Module, kernel_size: int = 3) -> None:
@@ -141,6 +281,27 @@ class EnBatchNorm2d(nn.Module):
         x = self.bn(x)
         x = self.conv(x)
         return x
+
+
+class BNet2d(nn.BatchNorm2d):
+    """
+    https://arxiv.org/pdf/2011.14150.pdf
+    https://github.com/yuhuixu1993/BNET/blob/d812c566a9c204d0503a8c4fa3ca76915483b07e/detection/mmdet/models/backbones/resnet.py
+    """
+
+    def __init__(self, num_features, *args, kernel_size=3, **kwargs):
+        super(BNet2d, self).__init__(num_features, *args, affine=False, **kwargs)
+        self.bnconv = nn.Conv2d(
+            num_features,
+            num_features,
+            kernel_size,
+            padding=(kernel_size - 1) // 2,
+            groups=num_features,
+            bias=True,
+        )
+
+    def forward(self, x):
+        return self.bnconv(super(BNet2d, self).forward(x))
 
 
 class ConvEnBn2d(nn.Module):
@@ -379,188 +540,188 @@ smp.encoders.encoders["en_resnet34"] = {
 }
 
 
-class UneXt50(nn.Module):
-    """
-    https://www.kaggle.com/iafoss/hubmap-pytorch-fast-ai-starter
-    """
-
-    def __init__(self, stride=1, **kwargs):
-        super().__init__()
-        # encoder
-        m = torch.hub.load(
-            "facebookresearch/semi-supervised-ImageNet1K-models", "resnext50_32x4d_ssl"
-        )
-        self.enc0 = nn.Sequential(m.conv1, m.bn1, nn.ReLU(inplace=True))
-        self.enc1 = nn.Sequential(
-            nn.MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1), m.layer1
-        )  # 256
-        self.enc2 = m.layer2  # 512
-        self.enc3 = m.layer3  # 1024
-        self.enc4 = m.layer4  # 2048
-        # aspp with customized dilatations
-        self.aspp = ASPP(
-            2048,
-            256,
-            out_c=512,
-            dilations=[stride * 1, stride * 2, stride * 3, stride * 4],
-        )
-        self.drop_aspp = nn.Dropout2d(0.5)
-        # decoder
-        self.dec4 = UnetBlock(512, 1024, 256)
-        self.dec3 = UnetBlock(256, 512, 128)
-        self.dec2 = UnetBlock(128, 256, 64)
-        self.dec1 = UnetBlock(64, 64, 32)
-        self.fpn = FPN([512, 256, 128, 64], [16] * 4)
-        self.drop = nn.Dropout2d(0.1)
-        self.final_conv = nn.Conv2d(32 + 16 * 4, 1, kernel_size=1)
-
-    def forward(self, x):
-        enc0 = self.enc0(x)
-        enc1 = self.enc1(enc0)
-        enc2 = self.enc2(enc1)
-        enc3 = self.enc3(enc2)
-        enc4 = self.enc4(enc3)
-        enc5 = self.aspp(enc4)
-        dec3 = self.dec4(self.drop_aspp(enc5), enc3)
-        dec2 = self.dec3(dec3, enc2)
-        dec1 = self.dec2(dec2, enc1)
-        dec0 = self.dec1(dec1, enc0)
-        x = self.fpn([enc5, dec3, dec2, dec1], dec0)
-        x = self.final_conv(self.drop(x))
-        x = F.interpolate(x, scale_factor=2, mode="bilinear")
-        return x
-
-
-class FPN(nn.Module):
-    def __init__(self, input_channels: list, output_channels: list):
-        super().__init__()
-        self.convs = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Conv2d(in_ch, out_ch * 2, kernel_size=3, padding=1),
-                    nn.ReLU(inplace=True),
-                    nn.BatchNorm2d(out_ch * 2),
-                    nn.Conv2d(out_ch * 2, out_ch, kernel_size=3, padding=1),
-                )
-                for in_ch, out_ch in zip(input_channels, output_channels)
-            ]
-        )
-
-    def forward(self, xs: list, last_layer):
-        hcs = [
-            F.interpolate(
-                c(x), scale_factor=2 ** (len(self.convs) - i), mode="bilinear"
-            )
-            for i, (c, x) in enumerate(zip(self.convs, xs))
-        ]
-        hcs.append(last_layer)
-        return torch.cat(hcs, dim=1)
-
-
-class UnetBlock(nn.Module):
-    def __init__(
-        self,
-        up_in_c: int,
-        x_in_c: int,
-        nf: int = None,
-        blur: bool = False,
-        self_attention: bool = False,
-        **kwargs,
-    ):
-        super().__init__()
-        self.shuf = PixelShuffle_ICNR(up_in_c, up_in_c // 2, blur=blur, **kwargs)
-        self.bn = nn.BatchNorm2d(x_in_c)
-        ni = up_in_c // 2 + x_in_c
-        nf = nf if nf is not None else max(up_in_c // 2, 32)
-        # self.conv1 = ConvLayer(ni, nf, norm_type=None, **kwargs)
-        # self.conv2 = ConvLayer(
-        #     nf,
-        #     nf,
-        #     norm_type=None,
-        #     xtra=SelfAttention(nf) if self_attention else None,
-        #     **kwargs
-        # )
-
-        self.conv1 = nn.Conv2d(ni, nf, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(nf, nf, kernel_size=3, stride=1, padding=1)
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, up_in: Tensor, left_in: Tensor) -> Tensor:
-        s = left_in
-        up_out = self.shuf(up_in)
-        cat_x = self.relu(torch.cat([up_out, self.bn(s)], dim=1))
-        return self.conv2(self.conv1(cat_x))
-
-
-class _ASPPModule(nn.Module):
-    def __init__(self, inplanes, planes, kernel_size, padding, dilation, groups=1):
-        super().__init__()
-        self.atrous_conv = nn.Conv2d(
-            inplanes,
-            planes,
-            kernel_size=kernel_size,
-            stride=1,
-            padding=padding,
-            dilation=dilation,
-            bias=False,
-            groups=groups,
-        )
-        self.bn = nn.BatchNorm2d(planes)
-        self.relu = nn.ReLU()
-
-        self._init_weight()
-
-    def forward(self, x):
-        x = self.atrous_conv(x)
-        x = self.bn(x)
-
-        return self.relu(x)
-
-    def _init_weight(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                torch.nn.init.kaiming_normal_(m.weight)
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
-
-
-class ASPP(nn.Module):
-    def __init__(self, inplanes=512, mid_c=256, dilations=[6, 12, 18, 24], out_c=None):
-        super().__init__()
-        self.aspps = [_ASPPModule(inplanes, mid_c, 1, padding=0, dilation=1)] + [
-            _ASPPModule(inplanes, mid_c, 3, padding=d, dilation=d, groups=4)
-            for d in dilations
-        ]
-        self.aspps = nn.ModuleList(self.aspps)
-        self.global_pool = nn.Sequential(
-            nn.AdaptiveMaxPool2d((1, 1)),
-            nn.Conv2d(inplanes, mid_c, 1, stride=1, bias=False),
-            nn.BatchNorm2d(mid_c),
-            nn.ReLU(),
-        )
-        out_c = out_c if out_c is not None else mid_c
-        self.out_conv = nn.Sequential(
-            nn.Conv2d(mid_c * (2 + len(dilations)), out_c, 1, bias=False),
-            nn.BatchNorm2d(out_c),
-            nn.ReLU(inplace=True),
-        )
-        self.conv1 = nn.Conv2d(mid_c * (2 + len(dilations)), out_c, 1, bias=False)
-        self._init_weight()
-
-    def forward(self, x):
-        x0 = self.global_pool(x)
-        xs = [aspp(x) for aspp in self.aspps]
-        x0 = torch.nn.functional.interpolate(
-            x0, size=xs[0].size()[2:], mode="bilinear", align_corners=True
-        )
-        x = torch.cat([x0] + xs, dim=1)
-        return self.out_conv(x)
-
-    def _init_weight(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                torch.nn.init.kaiming_normal_(m.weight)
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
+# class UneXt50(nn.Module):
+#     """
+#     https://www.kaggle.com/iafoss/hubmap-pytorch-fast-ai-starter
+#     """
+#
+#     def __init__(self, stride=1, **kwargs):
+#         super().__init__()
+#         # encoder
+#         m = torch.hub.load(
+#             "facebookresearch/semi-supervised-ImageNet1K-models", "resnext50_32x4d_ssl"
+#         )
+#         self.enc0 = nn.Sequential(m.conv1, m.bn1, nn.ReLU(inplace=True))
+#         self.enc1 = nn.Sequential(
+#             nn.MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1), m.layer1
+#         )  # 256
+#         self.enc2 = m.layer2  # 512
+#         self.enc3 = m.layer3  # 1024
+#         self.enc4 = m.layer4  # 2048
+#         # aspp with customized dilatations
+#         self.aspp = ASPP(
+#             2048,
+#             256,
+#             out_c=512,
+#             dilations=[stride * 1, stride * 2, stride * 3, stride * 4],
+#         )
+#         self.drop_aspp = nn.Dropout2d(0.5)
+#         # decoder
+#         self.dec4 = UnetBlock(512, 1024, 256)
+#         self.dec3 = UnetBlock(256, 512, 128)
+#         self.dec2 = UnetBlock(128, 256, 64)
+#         self.dec1 = UnetBlock(64, 64, 32)
+#         self.fpn = FPN([512, 256, 128, 64], [16] * 4)
+#         self.drop = nn.Dropout2d(0.1)
+#         self.final_conv = nn.Conv2d(32 + 16 * 4, 1, kernel_size=1)
+#
+#     def forward(self, x):
+#         enc0 = self.enc0(x)
+#         enc1 = self.enc1(enc0)
+#         enc2 = self.enc2(enc1)
+#         enc3 = self.enc3(enc2)
+#         enc4 = self.enc4(enc3)
+#         enc5 = self.aspp(enc4)
+#         dec3 = self.dec4(self.drop_aspp(enc5), enc3)
+#         dec2 = self.dec3(dec3, enc2)
+#         dec1 = self.dec2(dec2, enc1)
+#         dec0 = self.dec1(dec1, enc0)
+#         x = self.fpn([enc5, dec3, dec2, dec1], dec0)
+#         x = self.final_conv(self.drop(x))
+#         x = F.interpolate(x, scale_factor=2, mode="bilinear")
+#         return x
+#
+#
+# class FPN(nn.Module):
+#     def __init__(self, input_channels: list, output_channels: list):
+#         super().__init__()
+#         self.convs = nn.ModuleList(
+#             [
+#                 nn.Sequential(
+#                     nn.Conv2d(in_ch, out_ch * 2, kernel_size=3, padding=1),
+#                     nn.ReLU(inplace=True),
+#                     nn.BatchNorm2d(out_ch * 2),
+#                     nn.Conv2d(out_ch * 2, out_ch, kernel_size=3, padding=1),
+#                 )
+#                 for in_ch, out_ch in zip(input_channels, output_channels)
+#             ]
+#         )
+#
+#     def forward(self, xs: list, last_layer):
+#         hcs = [
+#             F.interpolate(
+#                 c(x), scale_factor=2 ** (len(self.convs) - i), mode="bilinear"
+#             )
+#             for i, (c, x) in enumerate(zip(self.convs, xs))
+#         ]
+#         hcs.append(last_layer)
+#         return torch.cat(hcs, dim=1)
+#
+#
+# class UnetBlock(nn.Module):
+#     def __init__(
+#         self,
+#         up_in_c: int,
+#         x_in_c: int,
+#         nf: int = None,
+#         blur: bool = False,
+#         self_attention: bool = False,
+#         **kwargs,
+#     ):
+#         super().__init__()
+#         self.shuf = PixelShuffle_ICNR(up_in_c, up_in_c // 2, blur=blur, **kwargs)
+#         self.bn = nn.BatchNorm2d(x_in_c)
+#         ni = up_in_c // 2 + x_in_c
+#         nf = nf if nf is not None else max(up_in_c // 2, 32)
+#         # self.conv1 = ConvLayer(ni, nf, norm_type=None, **kwargs)
+#         # self.conv2 = ConvLayer(
+#         #     nf,
+#         #     nf,
+#         #     norm_type=None,
+#         #     xtra=SelfAttention(nf) if self_attention else None,
+#         #     **kwargs
+#         # )
+#
+#         self.conv1 = nn.Conv2d(ni, nf, kernel_size=3, stride=1, padding=1)
+#         self.conv2 = nn.Conv2d(nf, nf, kernel_size=3, stride=1, padding=1)
+#         self.relu = nn.ReLU(inplace=True)
+#
+#     def forward(self, up_in: Tensor, left_in: Tensor) -> Tensor:
+#         s = left_in
+#         up_out = self.shuf(up_in)
+#         cat_x = self.relu(torch.cat([up_out, self.bn(s)], dim=1))
+#         return self.conv2(self.conv1(cat_x))
+#
+#
+# class _ASPPModule(nn.Module):
+#     def __init__(self, inplanes, planes, kernel_size, padding, dilation, groups=1):
+#         super().__init__()
+#         self.atrous_conv = nn.Conv2d(
+#             inplanes,
+#             planes,
+#             kernel_size=kernel_size,
+#             stride=1,
+#             padding=padding,
+#             dilation=dilation,
+#             bias=False,
+#             groups=groups,
+#         )
+#         self.bn = nn.BatchNorm2d(planes)
+#         self.relu = nn.ReLU()
+#
+#         self._init_weight()
+#
+#     def forward(self, x):
+#         x = self.atrous_conv(x)
+#         x = self.bn(x)
+#
+#         return self.relu(x)
+#
+#     def _init_weight(self):
+#         for m in self.modules():
+#             if isinstance(m, nn.Conv2d):
+#                 torch.nn.init.kaiming_normal_(m.weight)
+#             elif isinstance(m, nn.BatchNorm2d):
+#                 m.weight.data.fill_(1)
+#                 m.bias.data.zero_()
+#
+#
+# class ASPP(nn.Module):
+#     def __init__(self, inplanes=512, mid_c=256, dilations=[6, 12, 18, 24], out_c=None):
+#         super().__init__()
+#         self.aspps = [_ASPPModule(inplanes, mid_c, 1, padding=0, dilation=1)] + [
+#             _ASPPModule(inplanes, mid_c, 3, padding=d, dilation=d, groups=4)
+#             for d in dilations
+#         ]
+#         self.aspps = nn.ModuleList(self.aspps)
+#         self.global_pool = nn.Sequential(
+#             nn.AdaptiveMaxPool2d((1, 1)),
+#             nn.Conv2d(inplanes, mid_c, 1, stride=1, bias=False),
+#             nn.BatchNorm2d(mid_c),
+#             nn.ReLU(),
+#         )
+#         out_c = out_c if out_c is not None else mid_c
+#         self.out_conv = nn.Sequential(
+#             nn.Conv2d(mid_c * (2 + len(dilations)), out_c, 1, bias=False),
+#             nn.BatchNorm2d(out_c),
+#             nn.ReLU(inplace=True),
+#         )
+#         self.conv1 = nn.Conv2d(mid_c * (2 + len(dilations)), out_c, 1, bias=False)
+#         self._init_weight()
+#
+#     def forward(self, x):
+#         x0 = self.global_pool(x)
+#         xs = [aspp(x) for aspp in self.aspps]
+#         x0 = torch.nn.functional.interpolate(
+#             x0, size=xs[0].size()[2:], mode="bilinear", align_corners=True
+#         )
+#         x = torch.cat([x0] + xs, dim=1)
+#         return self.out_conv(x)
+#
+#     def _init_weight(self):
+#         for m in self.modules():
+#             if isinstance(m, nn.Conv2d):
+#                 torch.nn.init.kaiming_normal_(m.weight)
+#             elif isinstance(m, nn.BatchNorm2d):
+#                 m.weight.data.fill_(1)
+#                 m.bias.data.zero_()

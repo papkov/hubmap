@@ -9,19 +9,21 @@ import torch
 from adabelief_pytorch import AdaBelief
 from catalyst import utils as cutils
 from catalyst.contrib.callbacks import WandbLogger
-from catalyst.contrib.nn import DiceLoss, IoULoss, Lookahead, RAdam
+from catalyst.contrib.nn import BCEDiceLoss, DiceLoss, IoULoss, Lookahead, RAdam
 from catalyst.dl import (
     CriterionCallback,
     DiceCallback,
     EarlyStoppingCallback,
     IouCallback,
     MetricAggregationCallback,
+    OptimizerCallback,
     SupervisedRunner,
 )
 from catalyst.metrics import dice
 from catalyst.metrics.dice import dice
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
+from pytorch_toolbelt.losses import DiceLoss as SoftDiceLoss
 from pytorch_toolbelt.utils.random import set_manual_seed
 from sklearn.model_selection import train_test_split
 from torch import nn, optim, sigmoid
@@ -141,6 +143,7 @@ def main(cfg: DictConfig):
     )
     model = model.to(device)
     model.train()
+    print(model)
 
     # Optimization
     # optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -183,6 +186,7 @@ def main(cfg: DictConfig):
 
     criterion = {
         "dice": DiceLoss(),
+        # "dice": SoftDiceLoss(mode="binary", smooth=1e-7),
         "iou": IoULoss(),
         "bce": nn.BCEWithLogitsLoss(),
         "lovasz": LovaszLossBinary(),
@@ -234,6 +238,8 @@ def main(cfg: DictConfig):
             # metrics
             DiceCallback(input_key="mask"),
             IouCallback(input_key="mask"),
+            # gradient accumulation
+            OptimizerCallback(accumulation_steps=cfg.optim.accumulate),
             # early stopping
             EarlyStoppingCallback(**cfg.scheduler.early_stopping, minimize=False),
             WandbLogger(project=cfg.project, config=cfg),

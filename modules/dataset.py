@@ -24,7 +24,7 @@ PathT = Union[Path, str]
 
 def get_file_paths(
     path: PathT = "../data/hubmap-256x256/",
-    use_ids: Tuple[int] = (0, 1, 2, 3, 4, 5, 6, 7),
+    use_ids: Tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7),
 ) -> Tuple[List[Path], List[Path], List[str]]:
     """
     Get lists of paths to training images and masks
@@ -54,8 +54,8 @@ def get_file_paths(
 class TrainDataset(Dataset):
     images: List[Path]
     masks: List[Path]
-    mean: Tuple[float] = (0.485, 0.456, 0.406)
-    std: Tuple[float] = (0.229, 0.224, 0.225)
+    mean: Tuple[float, ...] = (0.485, 0.456, 0.406)
+    std: Tuple[float, ...] = (0.229, 0.224, 0.225)
     transforms: Optional[Union[albu.BasicTransform, Any]] = None
 
     def __post_init__(self):
@@ -107,6 +107,41 @@ class TrainDataset(Dataset):
     #
     # def eval(self):
     #     self.applied_transforms = self.base_transforms
+
+
+class SearchDataset(Dataset):
+
+    def __init__(self, transform=None):
+        self.transform = transform
+        self.images, self.masks, _ = get_file_paths(
+            path="/gpfs/hpc/home/papkov/hubmap/data/hubmap-256x256/",
+            # TODO remove hardcode
+            use_ids=(0, 1, 2, 3, 4, 5, 6)
+        )
+        # Implement additional initialization logic if needed
+
+    def __len__(self):
+        # Replace `...` with the actual implementation
+        return len(self.images)
+
+    def __getitem__(self, index):
+        # Implement logic to get an image and its mask using the received index.
+        #
+        # `image` should be a NumPy array with the shape [height, width, num_channels].
+        # If an image contains three color channels, it should use an RGB color scheme.
+        #
+        # `mask` should be a NumPy array with the shape [height, width, num_classes] where `num_classes`
+        # is a value set in the `search.yaml` file. Each mask channel should encode values for a single class (usually
+        # pixel in that channel has a value of 1.0 if the corresponding pixel from the image belongs to this class and
+        # 0.0 otherwise). During augmentation search, `nn.BCEWithLogitsLoss` is used as a segmentation loss.
+        image = np.array(Image.open(self.images[index]).convert("RGB")).astype(np.uint8)
+        mask = np.array(Image.open(self.masks[index]))[..., None].astype(np.float32)
+
+        if self.transform is not None:
+            transformed = self.transform(image=image, mask=mask)
+            image = transformed["image"]
+            mask = transformed["mask"]
+        return image, mask
 
 
 @dataclass

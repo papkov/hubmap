@@ -29,7 +29,7 @@ model:
   arch: unet
   encoder_name: se_resnext50_32x4d
   encoder_weights: imagenet
-  convert_bn: False
+  convert_bn: group  # {None, group, instance, en}
 
 optim:
   name: radam
@@ -38,6 +38,7 @@ optim:
   wd: 0
   lr_encoder: 1e-3
   wd_encoder: 0
+  accumulate: 1
 
 loss:
   bce: 1.0
