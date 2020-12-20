@@ -12,6 +12,7 @@ from catalyst import utils as cutils
 from catalyst.contrib.callbacks import WandbLogger
 from catalyst.contrib.nn import BCEDiceLoss, DiceLoss, IoULoss, Lookahead, RAdam
 from catalyst.dl import (
+    SchedulerCallback,
     CriterionCallback,
     DiceCallback,
     EarlyStoppingCallback,
@@ -261,11 +262,11 @@ def main(cfg: DictConfig):
             model=model,
             criterion=criterion,
             optimizer=optimizer,
+            scheduler=scheduler,
             callbacks=callbacks,
             logdir=cfg.train.logdir,
             loaders=data_loaders,
             num_epochs=cfg.train.num_epochs,
-            scheduler=scheduler,
             verbose=True,
             main_metric=cfg.train.main_metric,
             minimize_metric=False,
