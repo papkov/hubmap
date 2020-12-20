@@ -5,6 +5,7 @@ import numpy as np
 import rasterio
 import torch
 from rasterio.enums import Resampling
+import random
 
 
 def read_tiff(path: str, scale_factor: float):
@@ -92,3 +93,17 @@ def polygon_area(x, y):
     :return:
     """
     return 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+
+
+
+
+def set_seed(seed: int, device: str = "cuda"):
+    print(f"Seed {seed} for device {device}")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    if device == 'cuda':
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False

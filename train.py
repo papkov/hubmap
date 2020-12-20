@@ -2,6 +2,7 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 
+import albumentations as albu
 import hydra
 import numpy as np
 import pandas as pd
@@ -19,22 +20,20 @@ from catalyst.dl import (
     OptimizerCallback,
     SupervisedRunner,
 )
-from catalyst.metrics import dice
 from catalyst.metrics.dice import dice
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 from pytorch_toolbelt.losses import DiceLoss as SoftDiceLoss
-from pytorch_toolbelt.utils.random import set_manual_seed
 from sklearn.model_selection import train_test_split
-from torch import nn, optim, sigmoid
+from torch import nn, optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from inference import inference_one
 from modules import dataset as D
 from modules.lovasz import LovaszLossBinary
-from modules.model import batch_norm2en_resnet, get_segmentation_model
-from modules.util import rle_decode, set_device_id
+from modules.model import get_segmentation_model
+from modules.util import rle_decode, set_device_id, set_seed
 
 
 @torch.no_grad()
@@ -75,8 +74,8 @@ def main(cfg: DictConfig):
 
     print(OmegaConf.to_yaml(cfg))
 
-    set_manual_seed(cfg.seed)
     device = set_device_id(cfg.device)
+    set_seed(cfg.seed, device=device)
     # wandb.init(project=cfg.project, config=cfg)
 
     train_images, train_masks, unique_ids = D.get_file_paths(
@@ -98,13 +97,19 @@ def main(cfg: DictConfig):
             stratify=hashes,
         )
 
+    # Augmentations
+    if cfg.data.aug == 'auto':
+        transforms = albu.load(cwd / "autoalbument/autoconfig.json")
+    else:
+        transforms = D.get_training_augmentations()
+
     # Datasets
     train_ds = D.TrainDataset(
         images=train_images,
         masks=train_masks,
         mean=cfg.data.mean,
         std=cfg.data.std,
-        transforms=D.get_training_augmentations(),
+        transforms=transforms,
     )
     valid_ds = D.TrainDataset(
         images=valid_images,
@@ -134,6 +139,7 @@ def main(cfg: DictConfig):
     )
 
     # Model
+    print(f"Setup model {cfg.model.arch} {cfg.model.encoder_name} convert_bn={cfg.model.convert_bn}")
     model = get_segmentation_model(
         arch=cfg.model.arch,
         encoder_name=cfg.model.encoder_name,
@@ -146,7 +152,7 @@ def main(cfg: DictConfig):
     print(model)
 
     # Optimization
-    # optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    #
 
     # Reduce LR for pretrained encoder
     layerwise_params = {
@@ -156,7 +162,9 @@ def main(cfg: DictConfig):
 
     # Select optimizer
     # TODO getter
-    if cfg.optim.name == "radam":
+    if cfg.optim.name == "adam":
+        base_optimizer = optim.Adam(model_params, lr=cfg.optim.lr, weight_decay=cfg.optim.wd)
+    elif cfg.optim.name == "radam":
         base_optimizer = RAdam(model_params, lr=cfg.optim.lr, weight_decay=cfg.optim.wd)
     elif cfg.optim.name == "adabelief":
         base_optimizer = AdaBelief(

@@ -19,21 +19,22 @@ data:
 #  std: [0.15167958, 0.23584107, 0.13146145]
   mean: [0.485, 0.456, 0.406]  # Imagenet
   std: [0.229, 0.224, 0.225]
+  aug: default
 
 loader:
-  train_bs: 16
+  train_bs: 32
   valid_bs: 16
-  num_workers: 4
+  num_workers: 8
 
 model:
   arch: unet
   encoder_name: se_resnext50_32x4d
   encoder_weights: imagenet
-  convert_bn: group  # {None, group, instance, en}
+  convert_bn: False  # {False, group, instance, bnet, gnet}
 
 optim:
-  name: radam
-  lookahead: true
+  name: adam
+  lookahead: False
   lr: 1e-3
   wd: 0
   lr_encoder: 1e-3
@@ -58,7 +59,7 @@ scheduler:
 
 train:
   logdir: catalyst_log
-  num_epochs: 60
+  num_epochs: 40
   main_metric: dice
 
 

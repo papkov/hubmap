@@ -1,4 +1,4 @@
-from typing import Any, Callable, List, Optional, Tuple, Dict
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import segmentation_models_pytorch as smp
 import torch
@@ -25,7 +25,7 @@ def get_segmentation_model(
     :return:
     """
     arch = arch.lower()
-    if encoder_name == "en_resnet34":
+    if encoder_name == "en_resnet34" or checkpoint_path is not None:
         encoder_weights = None
 
     if arch == "unet":
@@ -63,15 +63,24 @@ def get_segmentation_model(
     else:
         raise ValueError
 
+    # TODO parametrize conversion
+    print(f"Convert BN to {convert_bn}")
     if convert_bn == "instance":
         print("Converting BatchNorm2d to InstanceNorm2d")
-        batch_norm2instance(model)
+        model = batch_norm2instance(model)
     elif convert_bn == "group":
         print("Converting BatchNorm2d to GroupNorm")
-        batch_norm2group(model)
-    elif convert_bn == "en":
-        print("Converting BatchNorm2d to EnBatchNorm2d")
-        batch_norm2en_resnet(model)
+        model = batch_norm2group(model, channels_per_group=1)
+    elif convert_bn == "bnet":
+        print("Converting BatchNorm2d to BNet2d")
+        model = batch_norm2bnet(model)
+    elif convert_bn == "gnet":
+        print("Converting BatchNorm2d to GNet2d")
+        model = batch_norm2gnet(model, channels_per_group=1)
+    elif not convert_bn:
+        print("Do not convert BatchNorm2d")
+    else:
+        raise ValueError
 
     if checkpoint_path is not None:
         # Load checkpoint
@@ -87,7 +96,7 @@ def get_segmentation_model(
 
 @torch.no_grad()
 def batch_norm2other(
-    module: nn.Module, OtherNorm: type, *args: Optional[Tuple[Any, ...]], **kwargs: Optional[Dict[str, Any]]
+    module: nn.Module, OtherNorm: type, *args: Any, **kwargs: Any
 ) -> nn.Module:
     """
     Converts BatchNorm2d to GroupNorm, InstanceNorm2d or other class inherited from NormBase
@@ -100,7 +109,7 @@ def batch_norm2other(
     """
     module_output = module
     if isinstance(module, torch.nn.BatchNorm2d):
-        if OtherNorm == torch.nn.GroupNorm:
+        if issubclass(OtherNorm, torch.nn.GroupNorm):
             # Set num channels per group to 16 by default as suggested in the paper
             kwargs_copy = kwargs.copy()  # Copy because of recursion
             num_groups = kwargs_copy.pop(
@@ -116,7 +125,6 @@ def batch_norm2other(
                 num_groups=min(num_groups, module.num_features),
                 affine=module.affine,
                 eps=module.eps,
-                *args,
                 **kwargs_copy,
             )
         elif issubclass(OtherNorm, torch.nn.modules.batchnorm._NormBase):
@@ -133,7 +141,10 @@ def batch_norm2other(
         else:
             raise ValueError(f"Class {OtherNorm} is not supported")
         for constant in module.__constants__:
-            if not module.affine and constant in ("weight", "bias"):
+            if constant == "affine" or (
+                not module.affine and constant in ("weight", "bias")
+            ):
+                # Do not reassign affine or W and b if module is not affine
                 continue
             if hasattr(module_output, constant):
                 setattr(module_output, constant, getattr(module, constant))
@@ -156,41 +167,19 @@ def batch_norm2instance(module: nn.Module) -> nn.Module:
     :return:
     """
     return batch_norm2other(module, torch.nn.InstanceNorm2d)
-    # module_output = module
-    # if isinstance(module, torch.nn.modules.batchnorm.BatchNorm2d):
-    #     module_output = torch.nn.InstanceNorm2d(
-    #         module.num_features,
-    #         module.eps,
-    #         module.momentum,
-    #         module.affine,
-    #         module.track_running_stats,
-    #     )
-    #     if module.affine:
-    #         with torch.no_grad():
-    #             module_output.weight = module.weight
-    #             module_output.bias = module.bias
-    #     module_output.running_mean = module.running_mean
-    #     module_output.running_var = module.running_var
-    #     module_output.num_batches_tracked = module.num_batches_tracked
-    #     if hasattr(module, "qconfig"):
-    #         module_output.qconfig = module.qconfig
-    # for name, child in module.named_children():
-    #     module_output.add_module(name, batch_norm2instance(child))
-    # del module
-    # return module_output
 
 
 def batch_norm2group(
     module: nn.Module,
-    num_groups: Optional[int] = 32,
-    channels_per_group: Optional[int] = 1,
+    num_groups: int = 32,
+    channels_per_group: Optional[int] = None,
 ) -> nn.Module:
     """
     Converts BatchNorm2d to GroupNorm
 
     :param module: nn.Module to convert all BatchNorm2d
     :param num_groups: for GroupNorm
-    :param channels_per_group: overwrites num_groups to set it proportional to num_channels (equal by default)
+    :param channels_per_group: overwrites `num_groups` to set it proportional to `num_channels`
     :return:
     """
     return batch_norm2other(
@@ -199,28 +188,34 @@ def batch_norm2group(
         num_groups=num_groups,
         channels_per_group=channels_per_group,
     )
-    #
-    # module_output = module
-    # if isinstance(module, torch.nn.modules.batchnorm.BatchNorm2d):
-    #     module_output = torch.nn.GroupNorm(
-    #         num_groups=num_groups,  # Default from paper, may try also module.num_features / 16
-    #         num_channels=module.num_features,
-    #         eps=module.eps,
-    #         affine=module.affine,
-    #     )
-    #     if module.affine:
-    #         with torch.no_grad():
-    #             module_output.weight = module.weight
-    #             module_output.bias = module.bias
-    #     if hasattr(module, "qconfig"):
-    #         module_output.qconfig = module.qconfig
-    # for name, child in module.named_children():
-    #     module_output.add_module(name, batch_norm2group(child))
-    # del module
-    # return module_output
 
 
-def batch_norm2en(module: nn.Module, kernel_size: int = 3) -> nn.Module:
+def batch_norm2gnet(
+    module: nn.Module,
+    kernel_size: int = 3,
+    num_groups: int = 32,
+    channels_per_group: Optional[int] = None,
+) -> nn.Module:
+    """
+    Converts BatchNorm2d to BNet2d
+    "Batch Normalization with Enhanced Linear Transformation"
+
+    :param module: nn.Module to convert all BatchNorm2d
+    :param kernel_size: kernel size for grouped convolution in GNet2d
+    :param num_groups: for GroupNorm
+    :param channels_per_group: overwrites num_groups to set it proportional to num_channels (equal by default)
+    :return:
+    """
+    return batch_norm2other(
+        module,
+        GNet2d,
+        kernel_size=kernel_size,
+        num_groups=num_groups,
+        channels_per_group=channels_per_group,
+    )
+
+
+def batch_norm2bnet(module: nn.Module, kernel_size: int = 3) -> nn.Module:
     """
     Converts BatchNorm2d to BNet2d
     "Batch Normalization with Enhanced Linear Transformation"
@@ -230,37 +225,27 @@ def batch_norm2en(module: nn.Module, kernel_size: int = 3) -> nn.Module:
     :return:
     """
     return batch_norm2other(module, BNet2d, kernel_size=kernel_size)
-    # module_output = module
-    # if isinstance(module, torch.nn.modules.batchnorm.BatchNorm2d):
-    #     module_output = EnBatchNorm2d(
-    #         module.num_features, kernel_size=kernel_size, eps=module.eps
-    #     )
-    #     if module.affine:
-    #         with torch.no_grad():
-    #             module_output.bn.weight = module.weight
-    #             module_output.bn.bias = module.bias
-    #     module_output.bn.running_mean = module.running_mean
-    #     module_output.bn.running_var = module.running_var
-    #     module_output.bn.num_batches_tracked = module.num_batches_tracked
-    #     if hasattr(module, "qconfig"):
-    #         module_output.bn.qconfig = module.qconfig
-    # for name, child in module.named_children():
-    #     module_output.add_module(name, batch_norm2en(child))
-    # del module
-    # return module_output
 
 
-def batch_norm2en_resnet(model: nn.Module, kernel_size: int = 3) -> None:
+def batch_norm2bnet_resnet(model: nn.Module, kernel_size: int = 3) -> None:
     """
     Converts inplace BatchNorm2d in ResNet-like encoder of a model
     :param model:
     :param kernel_size:
     :return:
     """
-    model.encoder.layer1 = batch_norm2en(model.encoder.layer1, kernel_size=kernel_size)
-    model.encoder.layer2 = batch_norm2en(model.encoder.layer2, kernel_size=kernel_size)
-    model.encoder.layer3 = batch_norm2en(model.encoder.layer3, kernel_size=kernel_size)
-    model.encoder.layer4 = batch_norm2en(model.encoder.layer4, kernel_size=kernel_size)
+    model.encoder.layer1 = batch_norm2bnet(
+        model.encoder.layer1, kernel_size=kernel_size
+    )
+    model.encoder.layer2 = batch_norm2bnet(
+        model.encoder.layer2, kernel_size=kernel_size
+    )
+    model.encoder.layer3 = batch_norm2bnet(
+        model.encoder.layer3, kernel_size=kernel_size
+    )
+    model.encoder.layer4 = batch_norm2bnet(
+        model.encoder.layer4, kernel_size=kernel_size
+    )
 
 
 # Batch Normalization with Enhanced Linear Transformation
@@ -289,9 +274,12 @@ class BNet2d(nn.BatchNorm2d):
     https://github.com/yuhuixu1993/BNET/blob/d812c566a9c204d0503a8c4fa3ca76915483b07e/detection/mmdet/models/backbones/resnet.py
     """
 
-    def __init__(self, num_features, *args, kernel_size=3, **kwargs):
+    def __init__(
+        self, num_features: int, *args: Any, kernel_size: int = 3, **kwargs: Any
+    ):
+        kwargs.pop("affine")  # Affine always False
         super(BNet2d, self).__init__(num_features, *args, affine=False, **kwargs)
-        self.bnconv = nn.Conv2d(
+        self.conv = nn.Conv2d(
             num_features,
             num_features,
             kernel_size,
@@ -300,8 +288,38 @@ class BNet2d(nn.BatchNorm2d):
             bias=True,
         )
 
-    def forward(self, x):
-        return self.bnconv(super(BNet2d, self).forward(x))
+    def forward(self, x: Tensor) -> Tensor:
+        return self.conv(super(BNet2d, self).forward(x))
+
+
+class GNet2d(nn.GroupNorm):
+    """
+    https://arxiv.org/pdf/2011.14150.pdf
+    https://github.com/yuhuixu1993/BNET/blob/d812c566a9c204d0503a8c4fa3ca76915483b07e/detection/mmdet/models/backbones/resnet.py
+    """
+
+    def __init__(
+        self,
+        num_groups: int,
+        num_channels: int,
+        eps: float = 1e-5,
+        kernel_size: int = 3,
+        **kwargs: Any,
+    ):
+        super(GNet2d, self).__init__(
+            num_groups=num_groups, num_channels=num_channels, eps=eps, affine=False
+        )
+        self.bnconv = nn.Conv2d(
+            num_channels,
+            num_channels,
+            kernel_size,
+            padding=(kernel_size - 1) // 2,
+            groups=num_channels,
+            bias=True,
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.bnconv(super(GNet2d, self).forward(x))
 
 
 class ConvEnBn2d(nn.Module):
@@ -315,7 +333,8 @@ class ConvEnBn2d(nn.Module):
             stride=stride,
             bias=False,
         )
-        self.bn = EnBatchNorm2d(out_channel, eps=1e-5)
+        # self.bn = EnBatchNorm2d(out_channel, eps=1e-5)
+        self.bn = BNet2d(out_channel, eps=1e-5)
 
     def forward(self, x):
         x = self.conv(x)

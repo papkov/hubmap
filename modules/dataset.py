@@ -110,13 +110,12 @@ class TrainDataset(Dataset):
 
 
 class SearchDataset(Dataset):
-
     def __init__(self, transform=None):
         self.transform = transform
         self.images, self.masks, _ = get_file_paths(
             path="/gpfs/hpc/home/papkov/hubmap/data/hubmap-256x256/",
             # TODO remove hardcode
-            use_ids=(0, 1, 2, 3, 4, 5, 6)
+            use_ids=(0, 1, 2, 3, 4, 5, 6),
         )
         # Implement additional initialization logic if needed
 
