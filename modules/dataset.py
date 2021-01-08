@@ -13,10 +13,9 @@ import rasterio
 from albumentations.pytorch.transforms import ToTensorV2
 from PIL import Image
 from pytorch_toolbelt.inference.tiles import ImageSlicer
-from rasterio.enums import Resampling
 from rasterio.windows import Window
 from torch import Tensor as T
-from torch.utils.data import Dataset, SubsetRandomSampler
+from torch.utils.data import Dataset
 
 Array = np.ndarray
 PathT = Union[Path, str]
@@ -154,6 +153,7 @@ class TiffFile(Dataset):
     weight: str = "pyramid"
     anatomical_structure: Optional[List[Dict[str, Any]]] = None
     filter_crops: bool = True
+    padding_mode = "constant"
 
     def __post_init__(self):
         # Get image hash name
@@ -171,10 +171,11 @@ class TiffFile(Dataset):
         self.image = rasterio.open(
             self.path, transform=identity, num_threads=self.num_threads
         )
+        print("Image shape:", self.image.shape)
 
         # Set up tiler
         self.tiler = ImageSlicer(
-            self.image.shape,
+            self.image.shape + (3, ),  # add channel dim
             tile_size=self.tile_size,
             tile_step=self.tile_step,
             weight=self.weight,
@@ -186,9 +187,12 @@ class TiffFile(Dataset):
         self.within_any = []
         self.within_region = []
         for i, crop in enumerate(self.tiler.crops):
-            (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.tiler.crop_no_pad(
-                i, self.random_crop
-            )
+            if self.random_crop:
+                crop = [np.random.randint(0, shape - ts - 1) for shape, ts in zip(self.image.shape, self.tiler.tile_size)]
+            (ic0, ic1), (tc0, tc1), crop = self.tiler.project_crop_to_tile(crop)
+            (iy0, ix0), (iy1, ix1) = tuple(ic0), tuple(ic1)
+            (ty0, tx0), (ty1, tx1) = tuple(tc0), tuple(tc1)
+
             within_any, within_region = self.is_within((iy0, iy1), (ix0, ix1))
             if self.filter_crops:
                 if not within_any:
@@ -207,19 +211,24 @@ class TiffFile(Dataset):
 
         # Allocate tile
         tile_width, tile_height = self.tiler.tile_size
-        tile = np.zeros((tile_width, tile_height, self.image.count), dtype=np.uint8)
+        # tile = np.zeros((tile_width, tile_height, self.image.count), dtype=np.uint8)
 
         # Read window
         window = self.image.read(
             [1, 2, 3],  # read all three channels
             window=Window.from_slices((iy0, iy1), (ix0, ix1)),
-        )
+        ).astype(np.uint8)
         # Reshape if necessary
         if window.shape[-1] != 3:
             window = np.moveaxis(window, 0, -1)
 
-        # Map read image to the tile
-        tile[ty0:ty1, tx0:tx1] = window
+        pad_width = [(ty0, self.tile_size - ty1), (tx0, self.tile_size - tx1), (0, 0)]
+        # Create tile by padding image slice to the tile size
+        tile = np.pad(window, pad_width=pad_width, mode=self.padding_mode)
+        assert tile.shape == (self.tile_size, self.tile_size, 3)
+        #
+        # # Map read image to the tile
+        # tile[ty0:ty1, tx0:tx1] = window
 
         # Scale the tile
         tile = cv2.resize(

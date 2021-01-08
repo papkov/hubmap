@@ -250,6 +250,7 @@ def main(cfg: DictConfig):
             # gradient accumulation
             OptimizerCallback(accumulation_steps=cfg.optim.accumulate),
             # early stopping
+            SchedulerCallback(reduced_metric="loss_dice"),
             EarlyStoppingCallback(**cfg.scheduler.early_stopping, minimize=False),
             WandbLogger(project=cfg.project, config=cfg),
         ]
@@ -270,6 +271,7 @@ def main(cfg: DictConfig):
             verbose=True,
             main_metric=cfg.train.main_metric,
             minimize_metric=False,
+            fp16=dict(amp=cfg.amp)
         )
     else:
         print("Validation only")

@@ -142,10 +142,10 @@ def inference_one(
 
     # Crop to original size inplace
     merged = merged[
-        test_ds.tiler.margin_top : test_ds.tiler.image_height
-        + test_ds.tiler.margin_top,
-        test_ds.tiler.margin_left : test_ds.tiler.image_width
-        + test_ds.tiler.margin_left,
+        test_ds.tiler.margin_start[0] : test_ds.tiler.image_shape[0]
+        + test_ds.tiler.margin_end[0],
+        test_ds.tiler.margin_start[1] : test_ds.tiler.image_shape[1]
+        + test_ds.tiler.margin_end[1],
     ]
 
     # RLE encoding
@@ -215,7 +215,8 @@ def main():
         "--path",
         help="Run path",
         type=str,
-        default="runs/unetplusplus-resnext50_32x4d/2020-12-09/00-28-06/",
+        # default="runs/unetplusplus-resnext50_32x4d/2020-12-09/00-28-06/",
+        default="multirun/2020-12-19/20-16-34/0/",
     )
     parser.add_argument(
         "--test_path", help="Test data path", default="data/test", type=str
@@ -234,7 +235,7 @@ def main():
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--tile_size", help="Tile size", default=1024, type=int)
     parser.add_argument("--tile_step", help="Tile step", default=896, type=int)
-    parser.add_argument("--device", "-d", help="Device", default=2, type=int)
+    parser.add_argument("--device", "-d", help="Device", default=1, type=int)
     parser.add_argument(
         "--threshold",
         "-t",

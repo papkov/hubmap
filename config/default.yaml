@@ -6,6 +6,7 @@ hydra:
 
 seed: 56
 device: 0
+amp: False
 
 data:
   path: data/hubmap-256x256/
@@ -29,6 +30,7 @@ loader:
 model:
   arch: unet
   encoder_name: se_resnext50_32x4d
+#  encoder_name: timm-skresnext50_32x4d
   encoder_weights: imagenet
   convert_bn: False  # {False, group, instance, bnet, gnet}
 
@@ -48,9 +50,9 @@ loss:
   lovasz: 0
 
 scheduler:
-  type: plateau
+  type: cosine
   plateau:
-    patience: 10
+    patience: 5
     factor: 0.1
   early_stopping:
     patience: 20
