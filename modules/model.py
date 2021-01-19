@@ -1,11 +1,35 @@
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+import numpy as np
 import segmentation_models_pytorch as smp
 import torch
 from adabelief_pytorch import AdaBelief
 from catalyst.contrib.nn import Lookahead, RAdam
+from catalyst.metrics.dice import dice
 from torch import Tensor, nn, optim
 from torch.nn import functional as F
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+
+@torch.no_grad()
+def find_dice_threshold(model: nn.Module, loader: DataLoader, device: str = "cuda"):
+    dice_th_range = np.arange(0.1, 0.7, 0.01)
+    masks = []
+    preds = []
+    dices = []
+    for batch in tqdm(loader):
+        preds.append(model(batch["image"].to(device)).cpu())
+        masks.append(batch["mask"])
+    masks = torch.cat(masks, dim=0)
+    preds = torch.cat(preds, dim=0)
+    for th in tqdm(dice_th_range):
+        dices.append(dice(preds, masks, threshold=th).item())
+        # dices.append(
+        #     np.mean([dice(p, m, threshold=th).item() for p, m in zip(preds, masks)])
+        # )
+    best_th = dice_th_range[np.argmax(dices)]
+    return best_th, (dice_th_range, dices)
 
 
 def get_scheduler(

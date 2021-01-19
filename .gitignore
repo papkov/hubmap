@@ -1,5 +1,7 @@
 .idea/
-data/*
+data/
+pretrained/
+requirements/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

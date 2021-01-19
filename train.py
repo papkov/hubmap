@@ -25,38 +25,19 @@ from catalyst.dl import (
 from catalyst.metrics.dice import dice
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
-from pytorch_toolbelt.losses import DiceLoss as SoftDiceLoss
-from sklearn.model_selection import train_test_split
 from torch import nn, optim
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
 
 from inference import inference_one
 from modules import dataset as D
 from modules.callbacks import WandbLogger
 from modules.lovasz import LovaszLossBinary
-from modules.model import get_optimizer, get_scheduler, get_segmentation_model
+from modules.model import (
+    find_dice_threshold,
+    get_optimizer,
+    get_scheduler,
+    get_segmentation_model,
+)
 from modules.util import rle_decode, set_device_id, set_seed
-
-
-@torch.no_grad()
-def find_dice_threshold(model: nn.Module, loader: DataLoader, device: str = "cuda"):
-    dice_th_range = np.arange(0.1, 0.7, 0.01)
-    masks = []
-    preds = []
-    dices = []
-    for batch in tqdm(loader):
-        preds.append(model(batch["image"].to(device)).cpu())
-        masks.append(batch["mask"])
-    masks = torch.cat(masks, dim=0)
-    preds = torch.cat(preds, dim=0)
-    for th in tqdm(dice_th_range):
-        dices.append(dice(preds, masks, threshold=th).item())
-        # dices.append(
-        #     np.mean([dice(p, m, threshold=th).item() for p, m in zip(preds, masks)])
-        # )
-    best_th = dice_th_range[np.argmax(dices)]
-    return best_th, (dice_th_range, dices)
 
 
 @hydra.main(config_path="config", config_name="default.yaml")
@@ -176,6 +157,7 @@ def main(cfg: DictConfig):
             # early stopping
             SchedulerCallback(reduced_metric="loss_dice"),
             EarlyStoppingCallback(**cfg.scheduler.early_stopping, minimize=False),
+            # TODO WandbLogger works poorly with multistage right now
             WandbLogger(project=cfg.project, config=cfg),
         ]
 
@@ -184,10 +166,14 @@ def main(cfg: DictConfig):
             device=device, input_key="image", input_target_key="mask"
         )
 
+        # TODO Scheduler does not work now, every stage restarts from base lr
         scheduler_warm_restart = optim.lr_scheduler.MultiStepLR(
-            optimizer, milestones=[1, 2], gamma=10,
+            optimizer,
+            milestones=[1, 2],
+            gamma=10,
         )
-        data_loaders = None
+
+        # TODO move hardcoded stages to config
         for i, (size, num_epochs) in enumerate(zip([256, 512, 1024], [20, 20, 20])):
             scale = size / 1024
             print(
@@ -228,6 +214,7 @@ def main(cfg: DictConfig):
                 name=cfg.scheduler.type,
                 optimizer=optimizer,
                 num_epochs=num_epochs,
+                # TODO config
                 eta_min=scheduler_warm_restart.get_last_lr()[0] / 100,
                 plateau=cfg.scheduler.plateau,
             )
@@ -294,7 +281,6 @@ def main(cfg: DictConfig):
         best_th, dices = find_dice_threshold(model, data_loaders["valid"])
         print("Best dice threshold", best_th, np.max(dices[1]))
         np.save(f"dices_val.npy", dices)
-
 
     #
     # # Load best checkpoint
