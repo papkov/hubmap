@@ -1,4 +1,5 @@
 import json
+from collections import OrderedDict
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
@@ -14,39 +15,12 @@ from albumentations.pytorch.transforms import ToTensorV2
 from PIL import Image
 from pytorch_toolbelt.inference.tiles import ImageSlicer
 from rasterio.windows import Window
+from sklearn.model_selection import train_test_split
 from torch import Tensor as T
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 
 Array = np.ndarray
 PathT = Union[Path, str]
-
-
-def get_file_paths(
-    path: PathT = "../data/hubmap-256x256/",
-    use_ids: Tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7),
-) -> Tuple[List[Path], List[Path], List[str]]:
-    """
-    Get lists of paths to training images and masks
-    :param path: path to the data
-    :param use_ids: ids to use
-    :return:
-    """
-    path = Path(path)
-    unique_ids = sorted(
-        set(str(p).split("/")[-1].split("_")[0] for p in (path / "train").iterdir())
-    )
-
-    images = sorted(
-        [p for i in use_ids for p in (path / "train").glob(f"{unique_ids[i]}_*.png")]
-    )
-
-    masks = sorted(
-        [p for i in use_ids for p in (path / "masks").glob(f"{unique_ids[i]}_*.png")]
-    )
-
-    assert len(images) == len(masks)
-
-    return images, masks, unique_ids
 
 
 @dataclass
@@ -175,7 +149,7 @@ class TiffFile(Dataset):
 
         # Set up tiler
         self.tiler = ImageSlicer(
-            self.image.shape + (3, ),  # add channel dim
+            self.image.shape + (3,),  # add channel dim
             tile_size=self.tile_size,
             tile_step=self.tile_step,
             weight=self.weight,
@@ -188,7 +162,10 @@ class TiffFile(Dataset):
         self.within_region = []
         for i, crop in enumerate(self.tiler.crops):
             if self.random_crop:
-                crop = [np.random.randint(0, shape - ts - 1) for shape, ts in zip(self.image.shape, self.tiler.tile_size)]
+                crop = [
+                    np.random.randint(0, shape - ts - 1)
+                    for shape, ts in zip(self.image.shape, self.tiler.tile_size)
+                ]
             (ic0, ic1), (tc0, tc1), crop = self.tiler.project_crop_to_tile(crop)
             (iy0, ix0), (iy1, ix1) = tuple(ic0), tuple(ic1)
             (ty0, tx0), (ty1, tx1) = tuple(tc0), tuple(tc1)
@@ -312,6 +289,7 @@ def get_training_augmentations():
     """
     transforms = albu.Compose(
         [
+            # albu.RandomCrop(256, 256),
             albu.HorizontalFlip(),
             albu.VerticalFlip(),
             albu.RandomRotate90(),
@@ -370,3 +348,135 @@ class Denormalize:
         if numpy:
             tensor = np.moveaxis(tensor.numpy(), 0, -1)
         return tensor
+
+
+def get_file_paths(
+    path: PathT = "data/hubmap-256x256/",
+    use_ids: Tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7),
+) -> Tuple[List[Path], List[Path], List[str]]:
+    """
+    Get lists of paths to training images and masks
+    :param path: path to the data
+    :param use_ids: ids to use
+    :return:
+    """
+    path = Path(path)
+    unique_ids = sorted(
+        set(str(p).split("/")[-1].split("_")[0] for p in (path / "train").iterdir())
+    )
+
+    images = sorted(
+        [p for i in use_ids for p in (path / "train").glob(f"{unique_ids[i]}_*.png")]
+    )
+
+    masks = sorted(
+        [p for i in use_ids for p in (path / "masks").glob(f"{unique_ids[i]}_*.png")]
+    )
+
+    assert len(images) == len(masks)
+
+    return images, masks, unique_ids
+
+
+def get_train_valid_path(
+    path: Path,
+    train_ids: Tuple[int],
+    valid_ids: Optional[Tuple[int]] = None,
+    seed: int = 56,
+    valid_split: float = 0.1,
+):
+    train_images, train_masks, unique_ids = get_file_paths(path=path, use_ids=train_ids)
+    if valid_ids is not None:
+        print(f"Use ids {valid_ids} for validation")
+        valid_images, valid_masks, _ = get_file_paths(path=path, use_ids=valid_ids)
+    else:
+        print("Use random stratified split")
+        hashes = [str(img).split("/")[-1].split("_")[0] for img in train_images]
+        train_images, valid_images, train_masks, valid_masks = train_test_split(
+            train_images,
+            train_masks,
+            test_size=valid_split,
+            random_state=seed,
+            stratify=hashes,
+        )
+    return train_images, valid_images, train_masks, valid_masks
+
+
+def get_train_valid_datasets(
+    train_images: List[Path],
+    train_masks: List[Path],
+    valid_images: List[Path],
+    valid_masks: List[Path],
+    mean: Tuple[float],
+    std: Tuple[float],
+    transforms: Optional[Union[albu.BasicTransform, Any]] = None,
+) -> Tuple[TrainDataset, TrainDataset]:
+    train_ds = TrainDataset(
+        images=train_images,
+        masks=train_masks,
+        mean=mean,
+        std=std,
+        transforms=transforms,
+    )
+    valid_ds = TrainDataset(
+        images=valid_images,
+        masks=valid_masks,
+        mean=mean,
+        std=std,
+        transforms=None,
+    )
+    return train_ds, valid_ds
+
+
+def get_train_valid_datasets_from_path(
+    path: Path,
+    train_ids: Tuple[int],
+    mean: Tuple[float],
+    std: Tuple[float],
+    valid_ids: Optional[Tuple[int]] = None,
+    seed: int = 56,
+    valid_split: float = 0.1,
+    transforms: Optional[Union[albu.BasicTransform, Any]] = None,
+):
+    train_images, valid_images, train_masks, valid_masks = get_train_valid_path(
+        path=path,
+        train_ids=train_ids,
+        valid_ids=valid_ids,
+        seed=seed,
+        valid_split=valid_split,
+    )
+    train_ds, valid_ds = get_train_valid_datasets(
+        train_images=train_images,
+        train_masks=train_masks,
+        valid_images=valid_images,
+        valid_masks=valid_masks,
+        mean=mean,
+        std=std,
+        transforms=transforms,
+    )
+    return train_ds, valid_ds
+
+
+def get_data_loaders(
+    train_ds: TrainDataset,
+    valid_ds: TrainDataset,
+    train_bs: int,
+    valid_bs: int,
+    num_workers: int,
+) -> "OrderedDict[str, DataLoader]":
+    return OrderedDict(
+        train=DataLoader(
+            train_ds,
+            batch_size=train_bs,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True,
+        ),
+        valid=DataLoader(
+            valid_ds,
+            batch_size=valid_bs,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=False,
+        ),
+    )

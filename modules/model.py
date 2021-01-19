@@ -1,9 +1,55 @@
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import segmentation_models_pytorch as smp
 import torch
-from torch import Tensor, nn
+from adabelief_pytorch import AdaBelief
+from catalyst.contrib.nn import Lookahead, RAdam
+from torch import Tensor, nn, optim
 from torch.nn import functional as F
+
+
+def get_scheduler(
+    name: str,
+    optimizer: optim.Optimizer,
+    num_epochs: int,
+    plateau: Dict[str, Any],
+    eta_min: float = 1e-8,
+):
+    if name == "cosine":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=num_epochs, eta_min=eta_min
+        )
+    elif name == "plateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, **plateau)
+    else:
+        raise ValueError
+
+    return scheduler
+
+
+def get_optimizer(
+    name: str,
+    model_params: Iterable,
+    lr: float = 1e-3,
+    wd: float = 0,
+    lookahead: bool = False,
+):
+    if name == "adam":
+        base_optimizer = optim.Adam(model_params, lr=lr, weight_decay=wd)
+    elif name == "radam":
+        base_optimizer = RAdam(model_params, lr=lr, weight_decay=wd)
+    elif name == "adabelief":
+        base_optimizer = AdaBelief(model_params, lr=lr, weight_decay=wd)
+    else:
+        raise ValueError
+
+    # Use lookahead
+    if lookahead:
+        optimizer = Lookahead(base_optimizer)
+    else:
+        optimizer = base_optimizer
+
+    return optimizer
 
 
 def get_segmentation_model(
