@@ -126,7 +126,7 @@ class TiffFile(Dataset):
     num_threads: Union[str, int] = "all_cpus"
     weight: str = "pyramid"
     anatomical_structure: Optional[List[Dict[str, Any]]] = None
-    filter_crops: bool = True
+    filter_crops: bool = False
     padding_mode = "constant"
 
     def __post_init__(self):
@@ -135,10 +135,15 @@ class TiffFile(Dataset):
 
         # Read anatomical structure
         if self.anatomical_structure is None:
-            with open(
-                str(self.path).replace(".tiff", "-anatomical-structure.json"), "r"
-            ) as f:
-                self.anatomical_structure = json.load(f)
+            try:
+                with open(
+                    str(self.path).replace(".tiff", "-anatomical-structure.json"), "r"
+                ) as f:
+                    self.anatomical_structure = json.load(f)
+            except FileNotFoundError:
+                print("Anatomical structure was not found, do not filter crops")
+                self.filter_crops = False
+                self.anatomical_structure = None
 
         # Open TIFF image
         identity = rasterio.Affine(1, 0, 0, 0, 1, 0)
@@ -170,8 +175,12 @@ class TiffFile(Dataset):
             (iy0, ix0), (iy1, ix1) = tuple(ic0), tuple(ic1)
             (ty0, tx0), (ty1, tx1) = tuple(tc0), tuple(tc1)
 
-            within_any, within_region = self.is_within((iy0, iy1), (ix0, ix1))
+            # Check if a tile belongs to a region within the structure
+            within_any = (True,)
+            within_region = {"any": True}
+            # TODO I suspect that filtering causes troubles on hidden data
             if self.filter_crops:
+                within_any, within_region = self.is_within((iy0, iy1), (ix0, ix1))
                 if not within_any:
                     continue
             self.batch_crops.append(self.tiler.crops[i])
@@ -184,17 +193,16 @@ class TiffFile(Dataset):
 
     def __getitem__(self, i: int) -> Dict[str, Any]:
         (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.crops[i]
-        # print((x0, x1, y0, y1), (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1))
 
         # Allocate tile
         tile_width, tile_height = self.tiler.tile_size
-        # tile = np.zeros((tile_width, tile_height, self.image.count), dtype=np.uint8)
 
         # Read window
         window = self.image.read(
             [1, 2, 3],  # read all three channels
             window=Window.from_slices((iy0, iy1), (ix0, ix1)),
         ).astype(np.uint8)
+
         # Reshape if necessary
         if window.shape[-1] != 3:
             window = np.moveaxis(window, 0, -1)
@@ -203,9 +211,6 @@ class TiffFile(Dataset):
         # Create tile by padding image slice to the tile size
         tile = np.pad(window, pad_width=pad_width, mode=self.padding_mode)
         assert tile.shape == (self.tile_size, self.tile_size, 3)
-        #
-        # # Map read image to the tile
-        # tile[ty0:ty1, tx0:tx1] = window
 
         # Scale the tile
         tile = cv2.resize(
@@ -227,6 +232,10 @@ class TiffFile(Dataset):
         return ret
 
     def plot_structure(self):
+        if self.anatomical_structure is None:
+            # do not proceed without anatomical structure
+            print("Anatomical structure not found")
+            return
         for region in self.anatomical_structure:
             coords = np.array(region["geometry"]["coordinates"][0])
             plt.plot(
@@ -237,13 +246,18 @@ class TiffFile(Dataset):
         plt.gca().invert_yaxis()
         plt.legend()
 
-    def is_within(self, y: Tuple[int, int], x: Tuple[int, int]):
+    def is_within(
+        self, y: Tuple[int, int], x: Tuple[int, int]
+    ) -> Tuple[bool, Dict[str, bool]]:
         """
         Check if tile corners are within anatomical structure
         :params y: tuple (y0, y1)
         :params x: tuple (x0, x1)
         :return: (bool within_any, dict within_region)
         """
+        if self.anatomical_structure is None:
+            # do not proceed without anatomical structure
+            return True, {"any": True}
         points = list(product(x, y))
         paths = {}
         for i, region in enumerate(self.anatomical_structure):

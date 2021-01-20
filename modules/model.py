@@ -3,7 +3,12 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import segmentation_models_pytorch as smp
 import torch
-from adabelief_pytorch import AdaBelief
+
+try:
+    from adabelief_pytorch import AdaBelief
+except ModuleNotFoundError:
+    print("adabelief not installed")
+
 from catalyst.contrib.nn import Lookahead, RAdam
 from catalyst.metrics.dice import dice
 from torch import Tensor, nn, optim

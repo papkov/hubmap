@@ -33,6 +33,7 @@ def inference_one(
     tile_size: int,
     tile_step: int,
     threshold: float = 0.5,
+    filter_crops: bool = False,
     save_raw: bool = False,
     tta_mode: int = 8,
     weight: str = "pyramid",
@@ -49,6 +50,7 @@ def inference_one(
         tile_size=tile_size,
         tile_step=tile_step,
         weight=weight,
+        filter_crops=filter_crops,
     )
 
     test_loader = DataLoader(
@@ -89,38 +91,42 @@ def inference_one(
         raise ValueError
 
     for i, batch in enumerate(tqdm(test_loader, desc="Predict")):
-        tiles_batch = batch["image"]
+        tiles_batch = batch["image"].float().to(device)
+        pred_batch = model(tiles_batch)
 
+        # TODO remove as unnecessary: all the filtering already happened in TiffFile class
         # Allocate zeros
-        bs = tiles_batch.shape[0]
-        pred_batch = (
-            torch.empty(
-                bs,
-                1,
-                int(tile_size * test_ds.scale_factor),
-                int(tile_size * test_ds.scale_factor),
-            )
-            .fill_(merger.default_value)
-            .float()
-            .to(device)
-        )
-
-        # Predict only non-empty batches
-        if not np.any(batch["within_any"].numpy()):
-            continue
-
-        to_predict = torch.tensor(np.argwhere(batch["within_any"].numpy()))[..., 0]
-
-        # Predict only tiles within structure
-        tiles_batch = tiles_batch[to_predict].float().to(device)
-        pred_batch[to_predict] = model(tiles_batch)
+        # bs = tiles_batch.shape[0]
+        # pred_batch = (
+        #     torch.empty(
+        #         bs,
+        #         1,
+        #         int(tile_size * test_ds.scale_factor),
+        #         int(tile_size * test_ds.scale_factor),
+        #     )
+        #     .fill_(merger.default_value)
+        #     .float()
+        #     .to(device)
+        # )
+        #
+        # # Predict only non-empty batches
+        # if not np.any(batch["within_any"].numpy()):
+        #     continue
+        #
+        # to_predict = torch.tensor(np.argwhere(batch["within_any"].numpy()))[..., 0]
+        #
+        # # Predict only tiles within structure
+        # tiles_batch = tiles_batch[to_predict].float().to(device)
+        # pred_batch[to_predict] = model(tiles_batch)
 
         # Run TTA, if any
         for aug, deaug in tta:
             # TODO decorator?
-            pred_batch[to_predict] += deaug(model(aug(tiles_batch)))
+            # pred_batch[to_predict] += deaug(model(aug(tiles_batch)))
+            pred_batch += deaug(model(aug(tiles_batch)))
         # Mean reduce
-        pred_batch[to_predict] /= len(tta) + 1
+        # pred_batch[to_predict] /= len(tta) + 1
+        pred_batch /= len(tta) + 1
 
         # Upscale if needed
         if test_ds.scale_factor != 1:
@@ -171,6 +177,7 @@ def inference_dir(
     tile_size: int,
     tile_step: int,
     save_raw: bool = False,
+    filter_crops: bool = False,
     tta_mode: int = 8,
     threshold: float = 0.5,
     weight: str = "pyramid",
@@ -196,6 +203,7 @@ def inference_dir(
             weight=weight,
             threshold=threshold,
             device=device,
+            filter_crops=filter_crops,
         )
         rle_encodings.append(rle)
 
@@ -244,6 +252,7 @@ def main():
         type=float,
     )
     parser.add_argument("--save_raw", action="store_true")
+    parser.add_argument("--filter_crops", action="store_true")
 
     args = parser.parse_args()
 
@@ -290,6 +299,7 @@ def main():
         save_raw=args.save_raw,
         tta_mode=args.tta,
         threshold=args.threshold,
+        filter_crops=args.filter_crops,
     )
 
 

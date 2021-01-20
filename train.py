@@ -54,6 +54,8 @@ def main(cfg: DictConfig):
         # TODO config merger (perhaps continue training with the same optimizer but other lrs?)
         resume_cfg = OmegaConf.load(cfg_path)
         cfg.model = resume_cfg.model
+        if cfg.train.num_epochs == 0:
+            cfg.data.scale_factor = resume_cfg.data.scale_factor
         OmegaConf.save(cfg, ".hydra/config.yaml")
 
     print(OmegaConf.to_yaml(cfg))
@@ -325,6 +327,7 @@ def main(cfg: DictConfig):
             tta_mode=0,
             weight="pyramid",
             device=device,
+            filter_crops=False,
         )
 
         print("Predict", shape)
