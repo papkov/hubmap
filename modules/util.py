@@ -8,7 +8,7 @@ import torch
 from rasterio.enums import Resampling
 
 
-def read_tiff(path: str, scale_factor: float):
+def read_tiff(path: str, scale_factor: float = 1.):
     identity = rasterio.Affine(1, 0, 0, 0, 1, 0)
     with rasterio.open(path, transform=identity) as image:
         image = image.read(

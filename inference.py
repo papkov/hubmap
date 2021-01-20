@@ -149,9 +149,9 @@ def inference_one(
     # Crop to original size inplace
     merged = merged[
         test_ds.tiler.margin_start[0] : test_ds.tiler.image_shape[0]
-        + test_ds.tiler.margin_end[0],
+        + test_ds.tiler.margin_start[0],
         test_ds.tiler.margin_start[1] : test_ds.tiler.image_shape[1]
-        + test_ds.tiler.margin_end[1],
+        + test_ds.tiler.margin_start[1],
     ]
 
     # RLE encoding
