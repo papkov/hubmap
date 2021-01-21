@@ -2,22 +2,21 @@ import argparse
 import gc
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import torch
 from omegaconf import DictConfig, OmegaConf
-from pytorch_toolbelt.inference import functional as F
 from pytorch_toolbelt.inference.tiles import TileMerger
-from torch import sigmoid
-from torch.nn import Identity, Module
+from torch.nn import Module
 from torch.nn.functional import interpolate
 from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from modules import dataset as D
 from modules.model import get_segmentation_model
+from modules.tta import get_tta
 from modules.util import rle_encode_less_memory, set_device_id
 
 PathT = Union[Path, str]
@@ -28,14 +27,15 @@ def inference_one(
     image_path: PathT,
     target_path: PathT,
     cfg: DictConfig,
-    model: Module,
+    model: Union[Module, List[Module]],
     scale_factor: float,
     tile_size: int,
     tile_step: int,
+    batch_size: int = 1,
     threshold: float = 0.5,
     filter_crops: bool = False,
     save_raw: bool = False,
-    tta_mode: int = 8,
+    tta_mode: Optional[str] = None,
     weight: str = "pyramid",
     device: str = "cuda",
 ) -> Tuple[Dict[str, Any], Tuple[int, int]]:
@@ -55,7 +55,7 @@ def inference_one(
 
     test_loader = DataLoader(
         test_ds,
-        batch_size=1,  # just do it one by one
+        batch_size=batch_size,  # just do it one by one
         num_workers=0,  # rasterio cannot be used with multiple workers
         shuffle=False,
         pin_memory=True,
@@ -69,64 +69,18 @@ def inference_one(
         device=device,
     )
 
-    # Test time augmentations
-    tta = [
-        (F.torch_fliplr, F.torch_fliplr),
-        (F.torch_flipud, F.torch_flipud),
-        (F.torch_rot180, F.torch_rot180),
-        (F.torch_rot90_cw, F.torch_rot90_ccw),
-        (F.torch_rot90_ccw, F.torch_rot90_cw),
-        (F.torch_transpose, F.torch_transpose),
-        (F.torch_transpose_rot90_cw, F.torch_rot90_ccw_transpose),
-        (F.torch_transpose_rot180, F.torch_rot180_transpose),
-        (F.torch_transpose_rot90_ccw, F.torch_rot90_cw_transpose),
-    ]
-    if tta_mode == 8:
-        tta = tta[2:]
-    elif tta_mode == 4:
-        tta = tta[:3]
-    elif tta_mode == 0:
-        tta = []
-    else:
-        raise ValueError
+    # Wrap model with TTA
+    if tta_mode is not None:
+        try:
+            model = get_tta(tta_mode, model)
+        except ValueError:
+            print("Do not apply TTA")
 
-    for i, batch in enumerate(tqdm(test_loader, desc="Predict")):
+    iterator = tqdm(test_loader, desc="Predict")
+    for i, batch in enumerate(iterator):
         tiles_batch = batch["image"].float().to(device)
         pred_batch = model(tiles_batch)
-
-        # TODO remove as unnecessary: all the filtering already happened in TiffFile class
-        # Allocate zeros
-        # bs = tiles_batch.shape[0]
-        # pred_batch = (
-        #     torch.empty(
-        #         bs,
-        #         1,
-        #         int(tile_size * test_ds.scale_factor),
-        #         int(tile_size * test_ds.scale_factor),
-        #     )
-        #     .fill_(merger.default_value)
-        #     .float()
-        #     .to(device)
-        # )
-        #
-        # # Predict only non-empty batches
-        # if not np.any(batch["within_any"].numpy()):
-        #     continue
-        #
-        # to_predict = torch.tensor(np.argwhere(batch["within_any"].numpy()))[..., 0]
-        #
-        # # Predict only tiles within structure
-        # tiles_batch = tiles_batch[to_predict].float().to(device)
-        # pred_batch[to_predict] = model(tiles_batch)
-
-        # Run TTA, if any
-        for aug, deaug in tta:
-            # TODO decorator?
-            # pred_batch[to_predict] += deaug(model(aug(tiles_batch)))
-            pred_batch += deaug(model(aug(tiles_batch)))
-        # Mean reduce
-        # pred_batch[to_predict] /= len(tta) + 1
-        pred_batch /= len(tta) + 1
+        iterator.set_postfix({"in_shape": tuple(tiles_batch.shape), "out_shape": tuple(pred_batch.shape)})
 
         # Upscale if needed
         if test_ds.scale_factor != 1:
@@ -154,6 +108,9 @@ def inference_one(
         + test_ds.tiler.margin_start[1],
     ]
 
+    # Check if predicted array is of the same shape as input
+    assert test_ds.image.shape == merged.shape
+
     # RLE encoding
     rle = {
         "id": test_ds.image_hash,
@@ -172,13 +129,13 @@ def inference_dir(
     test_path: PathT,
     target_path: PathT,
     cfg: DictConfig,
-    model: Module,
+    model: Union[Module, List[Module]],
     scale_factor: float,
     tile_size: int,
     tile_step: int,
     save_raw: bool = False,
     filter_crops: bool = False,
-    tta_mode: int = 8,
+    tta_mode: Optional[str] = None,
     threshold: float = 0.5,
     weight: str = "pyramid",
     device: str = "gpu",
@@ -238,7 +195,7 @@ def main():
         default=4,
         type=int,
     )
-    parser.add_argument("--tta", default=4, choices=[0, 4, 8], type=int)
+    parser.add_argument("--tta", default="d4", choices=["d1", "d2", "d4"], type=str)
 
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--tile_size", help="Tile size", default=1024, type=int)

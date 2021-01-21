@@ -1,6 +1,7 @@
 import os
 import random
 from typing import Optional, Union
+import matplotlib.pyplot as plt
 
 import numpy as np
 import rasterio
@@ -8,7 +9,7 @@ import torch
 from rasterio.enums import Resampling
 
 
-def read_tiff(path: str, scale_factor: float = 1.):
+def read_tiff(path: str, scale_factor: float = 1.0):
     identity = rasterio.Affine(1, 0, 0, 0, 1, 0)
     with rasterio.open(path, transform=identity) as image:
         image = image.read(
@@ -105,3 +106,10 @@ def set_seed(seed: int, device: str = "cuda"):
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+
+def clean_plot(ax):
+    plt.setp(ax, xticks=[], yticks=[])
+    plt.tight_layout()
+    plt.show()
+
