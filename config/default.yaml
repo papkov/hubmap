@@ -66,4 +66,7 @@ train:
   num_epochs: 50
   main_metric: dice
 
+checkpoint:
+  save_n_best: 3
+
 
