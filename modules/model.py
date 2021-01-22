@@ -85,6 +85,7 @@ def get_segmentation_model(
     arch: str,
     encoder_name: str,
     encoder_weights: Optional[str] = "imagenet",
+    pretrained_checkpoint_path: Optional[str] = None,
     checkpoint_path: Optional[str] = None,
     convert_bn: Optional[str] = None,
     **kwargs: Any,
@@ -95,12 +96,18 @@ def get_segmentation_model(
     :param encoder_name:
     :param encoder_weights:
     :param checkpoint_path:
+    :param pretrained_checkpoint_path:
     :param convert_bn:
     :param kwargs:
     :return:
     """
+
     arch = arch.lower()
-    if encoder_name == "en_resnet34" or checkpoint_path is not None:
+    if (
+        encoder_name == "en_resnet34"
+        or checkpoint_path is not None
+        or pretrained_checkpoint_path is not None
+    ):
         encoder_weights = None
 
     if arch == "unet":
@@ -137,6 +144,14 @@ def get_segmentation_model(
         )
     else:
         raise ValueError
+
+    if pretrained_checkpoint_path is not None:
+        print(f"Loading pretrained checkpoint {pretrained_checkpoint_path}")
+        state_dict = torch.load(
+            pretrained_checkpoint_path, map_location=torch.device("cpu")
+        )
+        model.encoder.load_state_dict(state_dict)
+        del state_dict
 
     # TODO parametrize conversion
     print(f"Convert BN to {convert_bn}")

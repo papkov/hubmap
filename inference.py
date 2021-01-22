@@ -12,7 +12,7 @@ from pytorch_toolbelt.inference.tiles import TileMerger
 from torch.nn import Module
 from torch.nn.functional import interpolate
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from modules import dataset as D
 from modules.model import get_segmentation_model
@@ -80,7 +80,9 @@ def inference_one(
     for i, batch in enumerate(iterator):
         tiles_batch = batch["image"].float().to(device)
         pred_batch = model(tiles_batch)
-        iterator.set_postfix({"in_shape": tuple(tiles_batch.shape), "out_shape": tuple(pred_batch.shape)})
+        iterator.set_postfix(
+            {"in_shape": tuple(tiles_batch.shape), "out_shape": tuple(pred_batch.shape)}
+        )
 
         # Upscale if needed
         if test_ds.scale_factor != 1:

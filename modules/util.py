@@ -1,8 +1,8 @@
 import os
 import random
 from typing import Optional, Union
-import matplotlib.pyplot as plt
 
+import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
 import torch
@@ -112,4 +112,3 @@ def clean_plot(ax):
     plt.setp(ax, xticks=[], yticks=[])
     plt.tight_layout()
     plt.show()
-

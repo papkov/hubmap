@@ -13,12 +13,12 @@ from catalyst import utils as cutils
 # from catalyst.contrib.callbacks import WandbLogger
 from catalyst.contrib.nn import BCEDiceLoss, DiceLoss, IoULoss, Lookahead, RAdam
 from catalyst.dl import (
+    CheckpointCallback,
     CriterionCallback,
     DiceCallback,
     EarlyStoppingCallback,
     IouCallback,
     MetricAggregationCallback,
-    CheckpointCallback,
     OptimizerCallback,
     SchedulerCallback,
     SupervisedRunner,
@@ -162,7 +162,7 @@ def main(cfg: DictConfig):
             EarlyStoppingCallback(**cfg.scheduler.early_stopping, minimize=False),
             # TODO WandbLogger works poorly with multistage right now
             WandbLogger(project=cfg.project, config=dict(cfg)),
-            CheckpointCallback(save_n_best=cfg.checkpoint.save_n_best),
+            # CheckpointCallback(save_n_best=cfg.checkpoint.save_n_best),
         ]
 
         # Training
