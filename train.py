@@ -1,3 +1,4 @@
+import json
 import os
 from collections import OrderedDict
 from pathlib import Path
@@ -80,6 +81,7 @@ def main(cfg: DictConfig):
         encoder_weights=cfg.model.encoder_weights,
         classes=1,
         convert_bn=cfg.model.convert_bn,
+        # decoder_attention_type="scse",  # TODO to config
     )
     model = model.to(device)
     model.train()
@@ -129,7 +131,14 @@ def main(cfg: DictConfig):
             raise ValueError("Nothing to resume, checkpoint missing")
 
     # We could only want to validate resume, in this case skip training routine
-    if cfg.train.num_epochs > 0:
+    best_th = 0.5
+
+    stats = None
+    if cfg.data.stats:
+        print(f"Use statistics from file: {cfg.data.stats}")
+        stats = cwd / cfg.data.stats
+
+    if cfg.train.num_epochs is not None:
         callbacks = [
             # Each criterion is calculated separately.
             CriterionCallback(
@@ -158,7 +167,7 @@ def main(cfg: DictConfig):
             # gradient accumulation
             OptimizerCallback(accumulation_steps=cfg.optim.accumulate),
             # early stopping
-            SchedulerCallback(reduced_metric="loss_dice"),
+            SchedulerCallback(reduced_metric="loss_dice", mode=cfg.scheduler.mode),
             EarlyStoppingCallback(**cfg.scheduler.early_stopping, minimize=False),
             # TODO WandbLogger works poorly with multistage right now
             WandbLogger(project=cfg.project, config=dict(cfg)),
@@ -177,8 +186,9 @@ def main(cfg: DictConfig):
             gamma=10,
         )
 
-        # TODO move hardcoded stages to config
-        for i, (size, num_epochs) in enumerate(zip([256, 512, 1024], [20, 20, 20])):
+        for i, (size, num_epochs) in enumerate(
+            zip(cfg.data.sizes, cfg.train.num_epochs)
+        ):
             scale = size / 1024
             print(
                 f"Training stage {i}, scale {scale}, size {size}, epochs {num_epochs}"
@@ -195,6 +205,7 @@ def main(cfg: DictConfig):
                 mean=cfg.data.mean,
                 std=cfg.data.std,
                 transforms=transforms,
+                stats=stats,
             )
 
             train_bs = int(cfg.loader.train_bs / (scale ** 2))
@@ -217,9 +228,10 @@ def main(cfg: DictConfig):
             scheduler = get_scheduler(
                 name=cfg.scheduler.type,
                 optimizer=optimizer,
-                num_epochs=num_epochs,
-                # TODO config
-                eta_min=scheduler_warm_restart.get_last_lr()[0] / 100,
+                num_epochs=num_epochs
+                * (len(data_loaders["train"]) if cfg.scheduler.mode == "batch" else 1),
+                eta_min=scheduler_warm_restart.get_last_lr()[0]
+                / cfg.scheduler.eta_min_factor,
                 plateau=cfg.scheduler.plateau,
             )
 
@@ -252,9 +264,10 @@ def main(cfg: DictConfig):
     else:
         print("Validation only")
         # Datasets
+        size = cfg.data.sizes[-1]
         train_ds, valid_ds = D.get_train_valid_datasets_from_path(
-            path=(cwd / cfg.data.path),
-            # path=(cwd / f"data/hubmap-{size}x{size}/"),
+            # path=(cwd / cfg.data.path),
+            path=(cwd / f"data/hubmap-{size}x{size}/"),
             train_ids=cfg.data.train_ids,
             valid_ids=cfg.data.valid_ids,
             seed=cfg.seed,
@@ -262,6 +275,7 @@ def main(cfg: DictConfig):
             mean=cfg.data.mean,
             std=cfg.data.std,
             transforms=transforms,
+            stats=stats,
         )
 
         train_bs = int(cfg.loader.train_bs / (cfg.data.scale_factor ** 2))
@@ -312,6 +326,8 @@ def main(cfg: DictConfig):
             for p in (cwd / cfg.data.path / "train").iterdir()
         )
     )
+    size = cfg.data.sizes[-1]
+    scale = size / 1024
     for image_id in cfg.data.valid_ids:
         image_name = unique_ids[image_id]
         print(f"\nValidate for {image_name}")
@@ -321,15 +337,16 @@ def main(cfg: DictConfig):
             target_path=Path("."),
             cfg=cfg,
             model=model,
-            scale_factor=cfg.data.scale_factor,
+            scale_factor=scale,
             tile_size=cfg.data.tile_size,
             tile_step=cfg.data.tile_step,
             threshold=best_th,
             save_raw=True,
-            tta_mode=0,
+            tta_mode=None,
             weight="pyramid",
             device=device,
-            filter_crops=False,
+            filter_crops=True,
+            stats=stats,
         )
 
         print("Predict", shape)

@@ -1,5 +1,6 @@
 import argparse
 import gc
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -38,20 +39,50 @@ def inference_one(
     tta_mode: Optional[str] = None,
     weight: str = "pyramid",
     device: str = "cuda",
+    stats: Optional[str] = None,
+    refine: bool = False,
 ) -> Tuple[Dict[str, Any], Tuple[int, int]]:
+    """
+
+    :param image_path:
+    :param target_path:
+    :param cfg:
+    :param model:
+    :param scale_factor:
+    :param tile_size:
+    :param tile_step:
+    :param batch_size:
+    :param threshold:
+    :param filter_crops:
+    :param save_raw:
+    :param tta_mode:
+    :param weight:
+    :param device:
+    :param stats:
+    :param refine:
+    :return:
+    """
     image_path = Path(image_path)
     target_path = Path(target_path)
+    image_id = str(image_path).split("/")[-1].split(".")[0]
+
+    if stats is not None:
+        with open(stats, "r") as f:
+            print(f"Use stats from {stats} for id {image_id}")
+            stats = json.load(f)
 
     test_ds = D.TestDataset(
         image_path.as_posix(),
-        mean=cfg.data.mean,
-        std=cfg.data.std,
+        mean=cfg.data.mean if stats is None else stats[image_id]["mean"],
+        std=cfg.data.std if stats is None else stats[image_id]["std"],
         scale_factor=scale_factor,
         tile_size=tile_size,
         tile_step=tile_step,
         weight=weight,
         filter_crops=filter_crops,
     )
+
+    print(test_ds.mean, test_ds.std)
 
     test_loader = DataLoader(
         test_ds,

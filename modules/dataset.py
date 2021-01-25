@@ -19,6 +19,8 @@ from sklearn.model_selection import train_test_split
 from torch import Tensor as T
 from torch.utils.data import DataLoader, Dataset
 
+from modules import util
+
 Array = np.ndarray
 PathT = Union[Path, str]
 
@@ -29,40 +31,40 @@ class TrainDataset(Dataset):
     masks: List[Path]
     mean: Tuple[float, ...] = (0.485, 0.456, 0.406)
     std: Tuple[float, ...] = (0.229, 0.224, 0.225)
+    stats_file: Optional[str] = None
     transforms: Optional[Union[albu.BasicTransform, Any]] = None
 
     def __post_init__(self):
+        self.stats = None
+        if self.stats_file is not None:
+            with open(self.stats_file, "r") as f:
+                self.stats = json.load(f)
 
         assert len(self.images) == len(self.masks)
-
-        self.base_transforms = albu.Compose(
-            [
-                albu.Normalize(mean=self.mean, std=self.std),
-                ToTensorV2(),
-            ]
-        )
-
-        self.applied_transforms = albu.Compose(
-            [
-                self.transforms,
-                self.base_transforms,
-            ]
-        )
-
-        self.denormalize = Denormalize(mean=self.mean, std=self.std)
+        self.to_tensor = ToTensorV2()
 
     def __getitem__(self, i: int):
-        image = np.array(Image.open(self.images[i]).convert("RGB"))
-        mask = np.array(Image.open(self.masks[i]))
+        image_id = str(self.images[i]).split("/")[-1].split("_")[0]
 
-        sample = self.applied_transforms(image=image, mask=mask)
-        image, mask = sample["image"], sample["mask"]
+        sample = dict(
+            image=np.array(Image.open(self.images[i]).convert("RGB")),
+            mask=np.array(Image.open(self.masks[i])),
+        )
+        if self.transforms is not None:
+            sample = self.transforms(**sample)
+
+        if self.stats is not None and image_id in self.stats:
+            sample["image"] = albu.normalize(sample["image"], **self.stats[image_id])
+        else:
+            sample["image"] = albu.normalize(sample["image"], self.mean, self.std)
+
+        sample = self.to_tensor(**sample)
 
         ret = {
             "i": i,
-            "image_id": str(self.images[i]).split("/")[-1].split("_")[0],
-            "image": image.float(),
-            "mask": mask.float().unsqueeze(0),
+            "image_id": image_id,
+            "image": sample["image"].float(),
+            "mask": sample["mask"].float().unsqueeze(0),
         }
 
         return ret
@@ -178,10 +180,19 @@ class TiffFile(Dataset):
             # Check if a tile belongs to a region within the structure
             within_any = (True,)
             within_region = {"any": True}
-            # TODO I suspect that filtering causes troubles on hidden data
+
             if self.filter_crops:
                 within_any, within_region = self.is_within((iy0, iy1), (ix0, ix1))
-                if not within_any:
+                is_cortex = np.any(
+                    [k.startswith("Cortex") for k in within_region.keys()]
+                )
+                within_cortex = np.any(
+                    [k.startswith("Cortex") and v for k, v in within_region.items()]
+                )
+                if is_cortex:
+                    if not within_cortex:
+                        continue
+                elif not within_any:
                     continue
             self.batch_crops.append(self.tiler.crops[i])
             self.crops.append(((ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1)))
@@ -190,6 +201,16 @@ class TiffFile(Dataset):
 
     def __len__(self):
         return len(self.crops)
+
+    def compute_image_stats(self) -> Tuple[List[float], List[float]]:
+        image = util.read_opened_rasterio(self.image)
+        mask_region = (
+            util.polygon2mask(self.anatomical_structure, image.shape[:2])
+            .clip(0, 1)
+            .astype(bool)
+        )
+        image = image[mask_region]
+        return list(image.mean(axis=0)), list(image.std(axis=0))
 
     def __getitem__(self, i: int) -> Dict[str, Any]:
         (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.crops[i]
@@ -237,12 +258,13 @@ class TiffFile(Dataset):
             print("Anatomical structure not found")
             return
         for region in self.anatomical_structure:
-            coords = np.array(region["geometry"]["coordinates"][0])
-            plt.plot(
-                coords[:, 0],
-                coords[:, 1],
-                label=region["properties"]["classification"]["name"],
-            )
+            for coords in region["geometry"]["coordinates"]:
+                coords = np.array(coords, dtype=np.int32).squeeze()
+                plt.plot(
+                    coords[:, 0],
+                    coords[:, 1],
+                    label=region["properties"]["classification"]["name"],
+                )
         plt.gca().invert_yaxis()
         plt.legend()
 
@@ -261,10 +283,10 @@ class TiffFile(Dataset):
         points = list(product(x, y))
         paths = {}
         for i, region in enumerate(self.anatomical_structure):
-            coords = np.array(region["geometry"]["coordinates"][0])
-            # coords[:, 1] = self.tiler.image_height - coords[:, 1]  # turn around to align image
-            region = region["properties"]["classification"]["name"]
-            paths[f"{region}_{i}"] = mpath.Path(coords)
+            region_name = region["properties"]["classification"]["name"]
+            for j, coords in enumerate(region["geometry"]["coordinates"]):
+                coords = np.array(coords, dtype=np.int32).squeeze()
+                paths[f"{region_name}_{i}_{j}"] = mpath.Path(coords)
         # if any corner is within the structure, consider the whole tile within
         within_region = {
             region: np.any(path.contains_points(points))
@@ -424,6 +446,7 @@ def get_train_valid_datasets(
     mean: Tuple[float],
     std: Tuple[float],
     transforms: Optional[Union[albu.BasicTransform, Any]] = None,
+    stats: Optional[str] = None,
 ) -> Tuple[TrainDataset, TrainDataset]:
     train_ds = TrainDataset(
         images=train_images,
@@ -431,6 +454,7 @@ def get_train_valid_datasets(
         mean=mean,
         std=std,
         transforms=transforms,
+        stats_file=stats,
     )
     valid_ds = TrainDataset(
         images=valid_images,
@@ -438,6 +462,7 @@ def get_train_valid_datasets(
         mean=mean,
         std=std,
         transforms=None,
+        stats_file=stats,
     )
     return train_ds, valid_ds
 
@@ -451,6 +476,7 @@ def get_train_valid_datasets_from_path(
     seed: int = 56,
     valid_split: float = 0.1,
     transforms: Optional[Union[albu.BasicTransform, Any]] = None,
+    stats: Optional[str] = None,
 ):
     train_images, valid_images, train_masks, valid_masks = get_train_valid_path(
         path=path,
@@ -467,6 +493,7 @@ def get_train_valid_datasets_from_path(
         mean=mean,
         std=std,
         transforms=transforms,
+        stats=stats,
     )
     return train_ds, valid_ds
 

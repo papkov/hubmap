@@ -1,4 +1,5 @@
 import torch
+from catalyst.utils.swa import average_weights, get_averaged_weights_by_path_mask
 from torch import Tensor as T
 from torch import nn
 

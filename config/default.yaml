@@ -12,29 +12,33 @@ check: False
 data:
 #  path: data/hubmap-512x512/
   path: data/hubmap-256x256/
-  scale_factor: 1
+  sizes: [256]  # [256, 512, 1024]
+  scale_factor: 0.25
   tile_size: 1024  # in original scale
-  tile_step: 896
+  tile_step: 704 # can consider 576 as well, previously was 896
   train_ids: [0, 1, 2, 3, 4, 5, 6]
   valid_ids: [7]  # Should always be a list
   valid_split: 0.1  # Use when valid_ids is empty
 #  mean: [0.65459856, 0.48386562, 0.69428385]  # HuBMAP
 #  std: [0.15167958, 0.23584107, 0.13146145]
-  mean: [0.485, 0.456, 0.406]  # Imagenet
-  std: [0.229, 0.224, 0.225]
+  mean: [0.62642119, 0.45024076, 0.67996012]  # HuBMAP only tissue regions
+  std: [0.1449615 , 0.19391453, 0.11216773]
+#  mean: [0.485, 0.456, 0.406]  # Imagenet
+#  std: [0.229, 0.224, 0.225]
+  stats: config/stats.json  # Individual stats for each image, can be None
   aug: default
 
 loader:
   train_bs: 2
-  valid_bs: 8
-  num_workers: 8
+  valid_bs: 2
+  num_workers: 4
 
 model:
   arch: unet
   encoder_name: se_resnext50_32x4d
 #  encoder_name: timm-skresnext50_32x4d
   encoder_weights: imagenet
-  convert_bn: False  # {False, group, instance, bnet, gnet}
+  convert_bn: gnet  # {False, group, instance, bnet, gnet}
 
 optim:
   name: adam
@@ -53,6 +57,8 @@ loss:
 
 scheduler:
   type: cosine
+  eta_min_factor: 200
+  mode: batch  # batch | epoch
   plateau:
     patience: 5
     factor: 0.1
@@ -63,7 +69,7 @@ scheduler:
 
 train:
   logdir: catalyst_log
-  num_epochs: 50
+  num_epochs: [30] # for each size stage (single by default)
   main_metric: dice
 
 checkpoint:

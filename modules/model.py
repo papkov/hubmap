@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import segmentation_models_pytorch as smp
@@ -15,7 +15,7 @@ from torch import Tensor, nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-
+from catalyst.utils.swa import average_weights
 
 @torch.no_grad()
 def find_dice_threshold(model: nn.Module, loader: DataLoader, device: str = "cuda"):
@@ -86,7 +86,7 @@ def get_segmentation_model(
     encoder_name: str,
     encoder_weights: Optional[str] = "imagenet",
     pretrained_checkpoint_path: Optional[str] = None,
-    checkpoint_path: Optional[str] = None,
+    checkpoint_path: Optional[Union[str, List[str]]] = None,
     convert_bn: Optional[str] = None,
     **kwargs: Any,
 ) -> nn.Module:
@@ -173,11 +173,17 @@ def get_segmentation_model(
         raise ValueError
 
     if checkpoint_path is not None:
-        # Load checkpoint
-        print(f"\nLoading checkpoint {str(checkpoint_path)}")
-        state_dict = torch.load(checkpoint_path, map_location=torch.device("cpu"))[
-            "model_state_dict"
-        ]
+        if not isinstance(checkpoint_path, list):
+            checkpoint_path = [checkpoint_path]
+        states = []
+        for cp in checkpoint_path:
+            # Load checkpoint
+            print(f"\nLoading checkpoint {str(cp)}")
+            state_dict = torch.load(cp, map_location=torch.device("cpu"))[
+                "model_state_dict"
+            ]
+            states.append(state_dict)
+        state_dict = average_weights(states)
         model.load_state_dict(state_dict)
         del state_dict
 

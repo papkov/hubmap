@@ -1,28 +1,34 @@
 import os
 import random
-from typing import Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
 import torch
 from rasterio.enums import Resampling
+from rasterio.io import DatasetReader
+
+
+def read_opened_rasterio(rasterio_image: DatasetReader, scale_factor: float = 1.0):
+    image = rasterio_image.read(
+        out_shape=(
+            rasterio_image.count,
+            int(rasterio_image.height * scale_factor),
+            int(rasterio_image.width * scale_factor),
+        ),
+        resampling=Resampling.bilinear,
+    )
+    if image.shape[-1] != 3:
+        image = np.moveaxis(image, 0, -1)
+    return image
 
 
 def read_tiff(path: str, scale_factor: float = 1.0):
     identity = rasterio.Affine(1, 0, 0, 0, 1, 0)
     with rasterio.open(path, transform=identity) as image:
-        image = image.read(
-            out_shape=(
-                image.count,
-                int(image.height * scale_factor),
-                int(image.width * scale_factor),
-            ),
-            resampling=Resampling.bilinear,
-        )
-        if image.shape[-1] != 3:
-            image = np.moveaxis(image, 0, -1)
-        return image
+        return read_opened_rasterio(image, scale_factor)
 
 
 def rle_encode(im):
@@ -112,3 +118,18 @@ def clean_plot(ax):
     plt.setp(ax, xticks=[], yticks=[])
     plt.tight_layout()
     plt.show()
+
+
+def polygon2mask(anatomical_structure: List[Dict[str, Any]], shape: Tuple[int, int]):
+    """
+    Convert anatomical structure to the np.array of given shape
+    :param anatomical_structure:
+    :param shape:
+    :return:
+    """
+    mask = np.zeros(shape).astype(np.uint8)
+    for i, region in enumerate(anatomical_structure):
+        for coords in region["geometry"]["coordinates"]:
+            coords = np.array(coords, dtype=np.int32).squeeze()[None, ...]
+            cv2.fillPoly(mask, coords, i + 1)
+    return mask.astype(np.uint8)
