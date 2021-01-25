@@ -133,6 +133,10 @@ def inference_one(
     merger.threshold_(threshold)
     merged = merger.image.cpu().numpy().squeeze().astype(np.uint8)
 
+    # TODO remove when new data is released
+    if image_id == "afa5e8098":
+        merged = np.roll(merged, (-40, -24))
+
     # Crop to original size inplace
     merged = merged[
         test_ds.tiler.margin_start[0] : test_ds.tiler.image_shape[0]
