@@ -345,7 +345,7 @@ def main(cfg: DictConfig):
             tta_mode=None,
             weight="pyramid",
             device=device,
-            filter_crops=True,
+            filter_crops="cortex",
             stats=stats,
         )
 

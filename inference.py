@@ -34,13 +34,15 @@ def inference_one(
     tile_step: int,
     batch_size: int = 1,
     threshold: float = 0.5,
-    filter_crops: bool = False,
+    filter_crops: Optional[str] = None,
     save_raw: bool = False,
     tta_mode: Optional[str] = None,
     weight: str = "pyramid",
     device: str = "cuda",
     stats: Optional[str] = None,
+    recompute_stats: bool = False,
     refine: bool = False,
+    roll: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> Tuple[Dict[str, Any], Tuple[int, int]]:
     """
 
@@ -59,22 +61,35 @@ def inference_one(
     :param weight:
     :param device:
     :param stats:
+    :param recompute_stats: if calculate full-image statistics anew
     :param refine:
+    :param roll: some gt masks might be shifted {"afa5e8098": (-40, -24)}
     :return:
     """
     image_path = Path(image_path)
     target_path = Path(target_path)
     image_id = str(image_path).split("/")[-1].split(".")[0]
 
+    mean, std = cfg.data.mean, cfg.data.std
     if stats is not None:
         with open(stats, "r") as f:
             print(f"Use stats from {stats} for id {image_id}")
-            stats = json.load(f)
+            stats: dict = json.load(f)
+
+        # If stats were used in training (present in config), but current image is not there, recompute
+        if image_id not in stats.keys():
+            print(f"Did not find id {image_id} in stats, recomputing")
+            recompute_stats = True
+        # Else, substitute config mean
+        else:
+            mean = stats[image_id]["mean"]
+            std = stats[image_id]["std"]
 
     test_ds = D.TestDataset(
         image_path.as_posix(),
-        mean=cfg.data.mean if stats is None else stats[image_id]["mean"],
-        std=cfg.data.std if stats is None else stats[image_id]["std"],
+        mean=mean,
+        std=std,
+        recompute_stats=recompute_stats,
         scale_factor=scale_factor,
         tile_size=tile_size,
         tile_step=tile_step,
@@ -133,9 +148,9 @@ def inference_one(
     merger.threshold_(threshold)
     merged = merger.image.cpu().numpy().squeeze().astype(np.uint8)
 
-    # TODO remove when new data is released
-    if image_id == "afa5e8098":
-        merged = np.roll(merged, (-40, -24))
+    if roll is not None:
+        if image_id in roll.keys():
+            merged = np.roll(merged, roll[image_id])
 
     # Crop to original size inplace
     merged = merged[
@@ -168,14 +183,17 @@ def inference_dir(
     cfg: DictConfig,
     model: Union[Module, List[Module]],
     scale_factor: float,
-    tile_size: int,
-    tile_step: int,
+    tile_size: int = 1024,
+    tile_step: int = 704,
+    batch_size: int = 1,
     save_raw: bool = False,
-    filter_crops: bool = False,
+    filter_crops: Optional[str] = None,
     tta_mode: Optional[str] = None,
     threshold: float = 0.5,
     weight: str = "pyramid",
     device: str = "gpu",
+    stats: Optional[str] = None,
+    roll: Optional[Dict[str, Tuple[int, int]]] = None,
 ):
     test_path = Path(test_path)
     target_path = Path(target_path)
@@ -192,12 +210,15 @@ def inference_dir(
             scale_factor=scale_factor,
             tile_size=tile_size,
             tile_step=tile_step,
+            batch_size=batch_size,
             save_raw=save_raw,
             tta_mode=tta_mode,
             weight=weight,
             threshold=threshold,
             device=device,
             filter_crops=filter_crops,
+            roll=roll,
+            stats=stats,
         )
         rle_encodings.append(rle)
 
@@ -236,7 +257,7 @@ def main():
 
     # parser.add_argument("--ids", nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--tile_size", help="Tile size", default=1024, type=int)
-    parser.add_argument("--tile_step", help="Tile step", default=896, type=int)
+    parser.add_argument("--tile_step", help="Tile step", default=704, type=int)
     parser.add_argument("--device", "-d", help="Device", default=1, type=int)
     parser.add_argument(
         "--threshold",
@@ -246,7 +267,9 @@ def main():
         type=float,
     )
     parser.add_argument("--save_raw", action="store_true")
-    parser.add_argument("--filter_crops", action="store_true")
+    parser.add_argument(
+        "--filter_crops", type=str, default="cortex", choices=["cortex", "tissue", None]
+    )
 
     args = parser.parse_args()
 

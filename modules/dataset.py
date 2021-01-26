@@ -128,7 +128,7 @@ class TiffFile(Dataset):
     num_threads: Union[str, int] = "all_cpus"
     weight: str = "pyramid"
     anatomical_structure: Optional[List[Dict[str, Any]]] = None
-    filter_crops: bool = False
+    filter_crops: Optional[str] = None  # "cortex" | "tissue"
     padding_mode = "constant"
 
     def __post_init__(self):
@@ -142,10 +142,18 @@ class TiffFile(Dataset):
                     str(self.path).replace(".tiff", "-anatomical-structure.json"), "r"
                 ) as f:
                     self.anatomical_structure = json.load(f)
+                    self.regions = [
+                        r["properties"]["classification"]["name"]
+                        for r in self.anatomical_structure
+                    ]
             except FileNotFoundError:
                 print("Anatomical structure was not found, do not filter crops")
-                self.filter_crops = False
+                self.filter_crops = None
                 self.anatomical_structure = None
+                self.regions = []
+
+        # Check if cortex region is present
+        self.cortex = np.any(["cortex" in r.lower() for r in self.regions])
 
         # Open TIFF image
         identity = rasterio.Affine(1, 0, 0, 0, 1, 0)
@@ -181,19 +189,24 @@ class TiffFile(Dataset):
             within_any = (True,)
             within_region = {"any": True}
 
-            if self.filter_crops:
+            if self.filter_crops is not None:
                 within_any, within_region = self.is_within((iy0, iy1), (ix0, ix1))
-                is_cortex = np.any(
-                    [k.startswith("Cortex") for k in within_region.keys()]
-                )
                 within_cortex = np.any(
-                    [k.startswith("Cortex") and v for k, v in within_region.items()]
+                    [
+                        "cortex" in region.lower() and within
+                        for region, within in within_region.items()
+                    ]
                 )
-                if is_cortex:
-                    if not within_cortex:
-                        continue
-                elif not within_any:
+
+                if (
+                    # If cortex is present on the slide and crop is not in cortex, do not predict
+                    self.filter_crops == "cortex"
+                    and self.cortex
+                    and not within_cortex
+                ) or not within_any:
+                    # If crop is not within any region, do not predict
                     continue
+
             self.batch_crops.append(self.tiler.crops[i])
             self.crops.append(((ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1)))
             self.within_any.append(within_any)
@@ -204,13 +217,16 @@ class TiffFile(Dataset):
 
     def compute_image_stats(self) -> Tuple[List[float], List[float]]:
         image = util.read_opened_rasterio(self.image)
-        mask_region = (
-            util.polygon2mask(self.anatomical_structure, image.shape[:2])
-            .clip(0, 1)
-            .astype(bool)
-        )
-        image = image[mask_region]
-        return list(image.mean(axis=0)), list(image.std(axis=0))
+        if self.anatomical_structure is not None:
+            mask_region = (
+                util.polygon2mask(self.anatomical_structure, image.shape[:2])
+                .clip(0, 1)
+                .astype(bool)
+            )
+            image = image[mask_region]
+        else:
+            image = image.reshape(-1, 3)
+        return list(image.mean(axis=0) / 255), list(image.std(axis=0) / 255)
 
     def __getitem__(self, i: int) -> Dict[str, Any]:
         (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.crops[i]
@@ -295,14 +311,20 @@ class TiffFile(Dataset):
         within_any = np.any(list(within_region.values()))
         return within_any, within_region
 
-
 @dataclass
 class TestDataset(TiffFile):
     mean: Tuple[float] = (0.485, 0.456, 0.406)
     std: Tuple[float] = (0.229, 0.224, 0.225)
+    recompute_stats: bool = False
 
     def __post_init__(self):
         super().__post_init__()
+
+        if self.recompute_stats:
+            print("Recomputing image statistics")
+            self.mean, self.std = self.compute_image_stats()
+            print("Computed:", self.mean, self.std)
+
         # Transforms
         self.transforms = albu.Compose(
             [albu.Normalize(mean=self.mean, std=self.std), ToTensorV2()]
@@ -331,7 +353,7 @@ def get_training_augmentations():
             albu.RandomRotate90(),
             albu.RandomBrightnessContrast(brightness_limit=0.5, contrast_limit=0.5),
             albu.HueSaturationValue(
-                hue_shift_limit=20, sat_shift_limit=50, val_shift_limit=40
+                hue_shift_limit=20, sat_shift_limit=50, val_shift_limit=40  # was 40
             ),
         ]
     )

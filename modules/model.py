@@ -11,11 +11,12 @@ except ModuleNotFoundError:
 
 from catalyst.contrib.nn import Lookahead, RAdam
 from catalyst.metrics.dice import dice
+from catalyst.utils.swa import average_weights
 from torch import Tensor, nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from catalyst.utils.swa import average_weights
+
 
 @torch.no_grad()
 def find_dice_threshold(model: nn.Module, loader: DataLoader, device: str = "cuda"):
@@ -65,6 +66,10 @@ def get_optimizer(
 ):
     if name == "adam":
         base_optimizer = optim.Adam(model_params, lr=lr, weight_decay=wd)
+    elif name == "sgd":
+        base_optimizer = optim.SGD(
+            model_params, lr=lr, weight_decay=wd, momentum=0.9, nesterov=True
+        )
     elif name == "radam":
         base_optimizer = RAdam(model_params, lr=lr, weight_decay=wd)
     elif name == "adabelief":
