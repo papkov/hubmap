@@ -72,9 +72,12 @@ def inference_one(
 
     mean, std = cfg.data.mean, cfg.data.std
     if stats is not None:
-        with open(stats, "r") as f:
-            print(f"Use stats from {stats} for id {image_id}")
-            stats: dict = json.load(f)
+        try:
+            with open(stats, "r") as f:
+                print(f"Use stats from {stats} for id {image_id}")
+                stats: Dict[str, Dict[str, List[float]]] = json.load(f)
+        except:
+            stats = {}  # leads to recompute_stats = True
 
         # If stats were used in training (present in config), but current image is not there, recompute
         if image_id not in stats.keys():
@@ -114,7 +117,7 @@ def inference_one(
         weight=test_ds.tiler.weight,
         device=device,
     )
-    print("Merger initialized")
+    print("TileMerger initialized")
 
     # Wrap model with TTA
     if tta_mode is not None:
