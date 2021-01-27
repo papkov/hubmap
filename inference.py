@@ -114,16 +114,23 @@ def inference_one(
         weight=test_ds.tiler.weight,
         device=device,
     )
+    print("Merger initialized")
 
     # Wrap model with TTA
     if tta_mode is not None:
         try:
             model = get_tta(tta_mode, model)
+            print(f"Apply TTA {tta_mode}")
         except ValueError:
             print("Do not apply TTA")
 
-    iterator = tqdm(test_loader, desc="Predict")
+    iterator = tqdm(test_loader if batch_size > 1 else test_ds, desc="Predict")
     for i, batch in enumerate(iterator):
+        # Iterate over dataset, hence need to unsqueeze batch dim
+        if batch_size == 1:
+            batch["image"] = batch["image"][None, ...]
+            batch["crop"] = batch["crop"][None, ...]
+
         tiles_batch = batch["image"].float().to(device)
         pred_batch = model(tiles_batch)
         iterator.set_postfix(
@@ -170,6 +177,7 @@ def inference_one(
     }
     target_shape = merged.shape
 
+    test_ds.close()
     del test_ds, test_loader, merged
     gc.collect()
     torch.cuda.empty_cache()

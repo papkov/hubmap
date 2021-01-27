@@ -3,6 +3,9 @@
 # https://www.kaggle.com/iafoss/lovasz
 # Codebase copied from Catalyst
 
+from functools import partial
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 from catalyst.contrib.nn.criterion.lovasz import (
@@ -10,6 +13,9 @@ from catalyst.contrib.nn.criterion.lovasz import (
     _lovasz_grad,
     mean,
 )
+from catalyst.utils.torch import get_activation_fn
+from torch import nn
+from torch import tensor as T
 from torch.nn.modules.loss import _Loss
 
 
@@ -94,4 +100,88 @@ class LovaszLossBinary(_Loss):
             )
             loss /= 2
 
+        return loss
+
+
+# Focal Tversky adopted from  https://github.com/nabsabraham/focal-tversky-unet/blob/master/losses.py
+
+
+def dice_score(outputs: T, targets: T, eps: float = 1):
+    intersection = torch.sum(targets * outputs)
+    union = torch.sum(targets) + torch.sum(outputs)
+    score = (2 * intersection + eps * (union == 0)) / (union + eps)
+    return score
+
+
+def dice_loss(outputs: T, targets: T):
+    loss = 1 - dice_score(outputs, targets)
+    return loss
+
+
+def tversky(
+    outputs: T,
+    targets: T,
+    alpha: float = 0.7,
+    eps: float = 1,
+    threshold: float = None,
+    activation: str = "Sigmoid",
+) -> T:
+    activation_fn = get_activation_fn(activation)
+    outputs = activation_fn(outputs)
+
+    if threshold is not None:
+        outputs = (outputs > threshold).float()
+
+    tp = torch.sum(targets * outputs)
+    fn = torch.sum(targets * (1 - outputs))
+    fp = torch.sum((1 - targets) * outputs)
+    return (tp + eps) / (tp + alpha * fn + (1 - alpha) * fp + eps)
+
+
+def tversky_loss(outputs, targets, **kwargs) -> T:
+    return 1 - tversky(outputs, targets, **kwargs)
+
+
+def focal_tversky_loss(outputs: T, targets: T, gamma: float = 0.75, **kwargs: Any):
+    tl = tversky_loss(outputs, targets, **kwargs)
+    return tl ** gamma
+
+
+class FocalTverskyLoss(nn.Module):
+    def __init__(
+        self,
+        eps: float = 1,
+        threshold: float = None,
+        activation: str = "Sigmoid",
+        alpha: float = 0.7,
+        gamma: float = 0.75,
+    ):
+        """
+
+        :param eps: smoothing parameter, default 1
+        :param threshold: threshold logits if necessary
+        :param activation: activation function
+        :param alpha: FN weight, when 0.5 - dice loss
+        :param gamma: focal exponent, when 1 - no effect
+        """
+        super().__init__()
+
+        self.loss_fn = partial(
+            focal_tversky_loss,
+            eps=eps,
+            threshold=threshold,
+            activation=activation,
+            alpha=alpha,
+            gamma=gamma,
+        )
+
+    def forward(self, logits: T, targets: T):
+        """
+        Calculates loss between ``logits`` and ``target`` tensors.
+        :param logits: model logits
+        :param targets: ground truth labels
+        :return: computed loss
+        """
+
+        loss = self.loss_fn(logits, targets)
         return loss

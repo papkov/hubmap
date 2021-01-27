@@ -9,4 +9,3 @@ visdom
 jsonpatch
 jsonpointer>=1.9
 torchfile
-autoalbument

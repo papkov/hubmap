@@ -32,7 +32,7 @@ from torch import nn, optim
 from inference import inference_one
 from modules import dataset as D
 from modules.callbacks import WandbLogger
-from modules.lovasz import LovaszLossBinary
+from modules.loss import FocalTverskyLoss, LovaszLossBinary
 from modules.model import (
     find_dice_threshold,
     get_optimizer,
@@ -109,6 +109,7 @@ def main(cfg: DictConfig):
         "iou": IoULoss(),
         "bce": nn.BCEWithLogitsLoss(),
         "lovasz": LovaszLossBinary(),
+        "focal_tversky": FocalTverskyLoss(eps=1e-7, alpha=0.7, gamma=0.75),
     }
 
     # Load states if resuming training
@@ -149,6 +150,11 @@ def main(cfg: DictConfig):
             CriterionCallback(
                 input_key="mask", prefix="loss_lovasz", criterion_key="lovasz"
             ),
+            CriterionCallback(
+                input_key="mask",
+                prefix="loss_focal_tversky",
+                criterion_key="focal_tversky",
+            ),
             # And only then we aggregate everything into one loss.
             MetricAggregationCallback(
                 prefix="loss",
@@ -159,6 +165,7 @@ def main(cfg: DictConfig):
                     "loss_iou": cfg.loss.iou,
                     "loss_bce": cfg.loss.bce,
                     "loss_lovasz": cfg.loss.lovasz,
+                    "loss_focal_tversky": cfg.loss.focal_tversky,
                 },
             ),
             # metrics

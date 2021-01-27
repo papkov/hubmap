@@ -9,7 +9,7 @@ try:
 except ModuleNotFoundError:
     print("adabelief not installed")
 
-from catalyst.contrib.nn import Lookahead, RAdam
+from catalyst.contrib.nn import Lookahead, RAdam, Ralamb
 from catalyst.metrics.dice import dice
 from catalyst.utils.swa import average_weights
 from torch import Tensor, nn, optim
@@ -72,6 +72,8 @@ def get_optimizer(
         )
     elif name == "radam":
         base_optimizer = RAdam(model_params, lr=lr, weight_decay=wd)
+    elif name == "ralamb":
+        base_optimizer = Ralamb(model_params, lr=lr, weight_decay=wd)
     elif name == "adabelief":
         base_optimizer = AdaBelief(model_params, lr=lr, weight_decay=wd)
     else:

@@ -18,8 +18,10 @@ from rasterio.windows import Window
 from sklearn.model_selection import train_test_split
 from torch import Tensor as T
 from torch.utils.data import DataLoader, Dataset
+from tqdm.auto import tqdm
 
 from modules import util
+from modules.augmentation import CopyPaste
 
 Array = np.ndarray
 PathT = Union[Path, str]
@@ -36,7 +38,7 @@ class TrainDataset(Dataset):
 
     def __post_init__(self):
         self.stats = None
-        if self.stats_file is not None:
+        if self.stats_file:
             with open(self.stats_file, "r") as f:
                 self.stats = json.load(f)
 
@@ -136,7 +138,9 @@ class TiffFile(Dataset):
         self.image_hash = self.path.split("/")[-1].split(".")[0]
 
         # Read anatomical structure
-        if self.anatomical_structure is None:
+        self.regions = []
+        self.cortex = False
+        if self.anatomical_structure is None and self.filter_crops is not None:
             try:
                 with open(
                     str(self.path).replace(".tiff", "-anatomical-structure.json"), "r"
@@ -146,19 +150,18 @@ class TiffFile(Dataset):
                         r["properties"]["classification"]["name"]
                         for r in self.anatomical_structure
                     ]
-            except FileNotFoundError:
+                    # Check if cortex region is present
+                    self.cortex = np.any(["cortex" in r.lower() for r in self.regions])
+            except:
                 print("Anatomical structure was not found, do not filter crops")
                 self.filter_crops = None
                 self.anatomical_structure = None
-                self.regions = []
-
-        # Check if cortex region is present
-        self.cortex = np.any(["cortex" in r.lower() for r in self.regions])
 
         # Open TIFF image
-        identity = rasterio.Affine(1, 0, 0, 0, 1, 0)
         self.image = rasterio.open(
-            self.path, transform=identity, num_threads=self.num_threads
+            self.path,
+            transform=rasterio.Affine(1, 0, 0, 0, 1, 0),  # identity
+            num_threads=self.num_threads,
         )
         print("Image shape:", self.image.shape)
 
@@ -169,6 +172,7 @@ class TiffFile(Dataset):
             tile_step=self.tile_step,
             weight=self.weight,
         )
+        print("Slicer set up")
 
         # Check and prepare all the crops
         self.crops = []
@@ -190,21 +194,15 @@ class TiffFile(Dataset):
             within_region = {"any": True}
 
             if self.filter_crops is not None:
-                within_any, within_region = self.is_within((iy0, iy1), (ix0, ix1))
-                within_cortex = np.any(
-                    [
-                        "cortex" in region.lower() and within
-                        for region, within in within_region.items()
-                    ]
-                )
+                within_any, within_cortex, within_region = self.is_within((iy0, iy1), (ix0, ix1))
 
                 if (
                     # If cortex is present on the slide and crop is not in cortex, do not predict
                     self.filter_crops == "cortex"
                     and self.cortex
                     and not within_cortex
-                ) or not within_any:
                     # If crop is not within any region, do not predict
+                ) or not within_any:
                     continue
 
             self.batch_crops.append(self.tiler.crops[i])
@@ -212,52 +210,126 @@ class TiffFile(Dataset):
             self.within_any.append(within_any)
             self.within_region.append(within_region)
 
+        print("Dataset initialized")
+
     def __len__(self):
         return len(self.crops)
 
-    def compute_image_stats(self) -> Tuple[List[float], List[float]]:
-        image = util.read_opened_rasterio(self.image)
-        if self.anatomical_structure is not None:
-            mask_region = (
-                util.polygon2mask(self.anatomical_structure, image.shape[:2])
-                .clip(0, 1)
-                .astype(bool)
-            )
-            image = image[mask_region]
-        else:
-            image = image.reshape(-1, 3)
-        return list(image.mean(axis=0) / 255), list(image.std(axis=0) / 255)
+    def close(self):
+        self.image.close()
 
-    def __getitem__(self, i: int) -> Dict[str, Any]:
-        (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.crops[i]
+    def compute_image_stats(
+        self, from_full_sized: bool = False
+    ) -> Tuple[List[float], List[float]]:
+        if from_full_sized:
+            # here we need to read full file into memory, but numbers are accurate
+            image = util.read_opened_rasterio(self.image, scale_factor=1)
+            if self.anatomical_structure is not None:
+                mask_region = (
+                    util.polygon2mask(self.anatomical_structure, image.shape[:2])
+                    .clip(0, 1)
+                    .astype(bool)
+                )
+                image = image[mask_region]
+            else:
+                image = image.reshape(-1, 3)
+            return list(image.mean(axis=0) / 255), list(image.std(axis=0) / 255)
+        else:
+            non_overlapping_tiler = ImageSlicer(
+                self.image.shape + (3,),  # add channel dim
+                tile_size=self.tile_size,
+                tile_step=self.tile_size,  # not tile_step
+                weight=self.weight,
+            )
+
+            # Read all the crops, approximate with mean
+            means = []
+            stds = []
+
+            # sum_x = np.zeros(3)
+            # sum_x2 = np.zeros(3)
+            # n = 0
+
+            for i, crop in enumerate(tqdm(non_overlapping_tiler.crops)):
+                (
+                    ((iy0, ix0), (iy1, ix1)),
+                    ((ty0, tx0), (ty1, tx1)),
+                    crop,
+                ) = non_overlapping_tiler.project_crop_to_tile(crop)
+                crop = self.read_crop(
+                    ((ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1)), pad_and_resize=False
+                )
+
+                # TODO remove duplicated
+                if self.filter_crops is not None:
+                    within_any, within_cortex, within_region = self.is_within((iy0, iy1), (ix0, ix1))
+
+                    if (
+                        # If cortex is present on the slide and crop is not in cortex, do not predict
+                        self.filter_crops == "cortex"
+                        and self.cortex
+                        and not within_cortex
+                        # If crop is not within any region, do not predict
+                    ) or not within_any:
+                        continue
+
+                # s = crop.sum(axis=(0, 1)) / 255
+                # sum_x += s
+                # sum_x2 += s ** 2
+                # n += np.product(crop.shape[:2])
+
+                means.append(crop.mean(axis=(0, 1)) / 255)
+                stds.append(crop.std(axis=(0, 1)) / 255)
+
+            # mean = sum_x / n
+            # std = np.sqrt((sum_x2 / n) - (mean * mean))
+            # return list(mean), list(std)
+
+            return list(np.mean(means, axis=0)), list(np.mean(stds, axis=0))
+
+    def read_crop(
+        self, crop: Tuple[Tuple[int, ...], Tuple[int, ...]], pad_and_resize: bool = True
+    ) -> Array:
+        (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = crop
 
         # Allocate tile
         tile_width, tile_height = self.tiler.tile_size
 
         # Read window
-        window = self.image.read(
+        tile = self.image.read(
             [1, 2, 3],  # read all three channels
             window=Window.from_slices((iy0, iy1), (ix0, ix1)),
         ).astype(np.uint8)
 
         # Reshape if necessary
-        if window.shape[-1] != 3:
-            window = np.moveaxis(window, 0, -1)
+        if tile.shape[-1] != 3:
+            tile = np.moveaxis(tile, 0, -1)
 
-        pad_width = [(ty0, self.tile_size - ty1), (tx0, self.tile_size - tx1), (0, 0)]
-        # Create tile by padding image slice to the tile size
-        tile = np.pad(window, pad_width=pad_width, mode=self.padding_mode)
-        assert tile.shape == (self.tile_size, self.tile_size, 3)
+        if pad_and_resize:
+            pad_width = [
+                (ty0, self.tile_size - ty1),
+                (tx0, self.tile_size - tx1),
+                (0, 0),
+            ]
+            # Create tile by padding image slice to the tile size
+            tile = np.pad(tile, pad_width=pad_width, mode=self.padding_mode)
+            assert tile.shape == (self.tile_size, self.tile_size, 3)
 
-        # Scale the tile
-        tile = cv2.resize(
-            tile,
-            (
-                int(tile_width * self.scale_factor),
-                int(tile_height * self.scale_factor),
-            ),
-            interpolation=cv2.INTER_AREA,
-        )
+            # Scale the tile
+            tile = cv2.resize(
+                tile,
+                (
+                    int(tile_width * self.scale_factor),
+                    int(tile_height * self.scale_factor),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        return tile
+
+    def __getitem__(self, i: int) -> Dict[str, Any]:
+        (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.crops[i]
+        tile = self.read_crop(self.crops[i])
 
         ret = {
             "image": tile,
@@ -286,7 +358,7 @@ class TiffFile(Dataset):
 
     def is_within(
         self, y: Tuple[int, int], x: Tuple[int, int]
-    ) -> Tuple[bool, Dict[str, bool]]:
+    ) -> Tuple[bool, bool, Dict[str, bool]]:
         """
         Check if tile corners are within anatomical structure
         :params y: tuple (y0, y1)
@@ -295,7 +367,7 @@ class TiffFile(Dataset):
         """
         if self.anatomical_structure is None:
             # do not proceed without anatomical structure
-            return True, {"any": True}
+            return True, True, {"any": True}
         points = list(product(x, y))
         paths = {}
         for i, region in enumerate(self.anatomical_structure):
@@ -309,7 +381,14 @@ class TiffFile(Dataset):
             for region, path in paths.items()
         }
         within_any = np.any(list(within_region.values()))
-        return within_any, within_region
+        within_cortex = np.any(
+            [
+                "cortex" in region.lower() and within
+                for region, within in within_region.items()
+            ]
+        )
+        return within_any, within_cortex, within_region
+
 
 @dataclass
 class TestDataset(TiffFile):
@@ -348,6 +427,7 @@ def get_training_augmentations():
     transforms = albu.Compose(
         [
             # albu.RandomCrop(256, 256),
+            # CopyPaste(pool_size=32),
             albu.HorizontalFlip(),
             albu.VerticalFlip(),
             albu.RandomRotate90(),
