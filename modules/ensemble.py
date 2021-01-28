@@ -8,7 +8,7 @@ class Ensemble(nn.Module):
     def __init__(self, *models: nn.Module):
         super().__init__()
         assert len(models) > 0
-        self.models = models
+        self.models = nn.ModuleList(models)
 
     def forward(self, x: T) -> T:
         out = None
