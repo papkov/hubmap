@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 from omegaconf import DictConfig, OmegaConf
 from pytorch_toolbelt.inference.tiles import TileMerger
+from skimage.morphology import remove_small_holes, remove_small_objects
 from torch.nn import Module
 from torch.nn.functional import interpolate
 from torch.utils.data import DataLoader
@@ -34,6 +35,7 @@ def inference_one(
     tile_step: int,
     batch_size: int = 1,
     threshold: float = 0.5,
+    interpolate_mode: str = "bicubic",
     filter_crops: Optional[str] = None,
     save_raw: bool = False,
     tta_mode: Optional[str] = None,
@@ -42,6 +44,7 @@ def inference_one(
     stats: Optional[str] = None,
     recompute_stats: bool = False,
     refine: bool = False,
+    postprocess: bool = False,
     roll: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> Tuple[Dict[str, Any], Tuple[int, int]]:
     """
@@ -134,15 +137,23 @@ def inference_one(
             batch["image"] = batch["image"][None, ...]
             batch["crop"] = batch["crop"][None, ...]
 
-        tiles_batch = batch["image"].float().to(device)
-        pred_batch = model(tiles_batch)
+        pred_batch = model(batch["image"].float().to(device))
         iterator.set_postfix(
-            {"in_shape": tuple(tiles_batch.shape), "out_shape": tuple(pred_batch.shape)}
+            {
+                "in_shape": tuple(batch["image"].shape),
+                "out_shape": tuple(pred_batch.shape),
+            }
         )
 
         # Upscale if needed
         if test_ds.scale_factor != 1:
-            pred_batch = interpolate(pred_batch, scale_factor=1 / test_ds.scale_factor)
+            # TODO align_corners=True seems a bit better on val=7, check
+            pred_batch = interpolate(
+                pred_batch,
+                scale_factor=1 / test_ds.scale_factor,
+                mode=interpolate_mode,
+                align_corners=True,
+            )
 
         merger.integrate_batch(batch=pred_batch, crop_coords=batch["crop"])
 
@@ -156,11 +167,21 @@ def inference_one(
         torch.save(merger.norm_mask, path_merged_norm_mask)
 
     merger.threshold_(threshold)
-    merged = merger.image.cpu().numpy().squeeze().astype(np.uint8)
+    merged = merger.image.cpu().numpy().squeeze().astype(bool)
+
+    if postprocess:
+        # TODO investigate
+        min_glomerulus_area = 16384  # 23480 for val 7, 16972 for val 5 (remove_small_objects makes worse)
+        merged = remove_small_objects(
+            merged, min_size=min_glomerulus_area, in_place=True
+        )
+        merged = remove_small_holes(
+            merged, area_threshold=min_glomerulus_area, in_place=True
+        )
 
     if roll is not None:
         if image_id in roll.keys():
-            merged = np.roll(merged, roll[image_id])
+            merged = np.roll(merged, roll[image_id], axis=(0, 1))
 
     # Crop to original size inplace
     merged = merged[
@@ -201,6 +222,8 @@ def inference_dir(
     filter_crops: Optional[str] = None,
     tta_mode: Optional[str] = None,
     threshold: float = 0.5,
+    postprocess: bool = False,
+    interpolate_mode: str = "bicubic",
     weight: str = "pyramid",
     device: str = "gpu",
     stats: Optional[str] = None,
@@ -221,11 +244,13 @@ def inference_dir(
             scale_factor=scale_factor,
             tile_size=tile_size,
             tile_step=tile_step,
+            interpolate_mode=interpolate_mode,
             batch_size=batch_size,
             save_raw=save_raw,
             tta_mode=tta_mode,
             weight=weight,
             threshold=threshold,
+            postprocess=postprocess,
             device=device,
             filter_crops=filter_crops,
             roll=roll,

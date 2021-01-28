@@ -352,7 +352,7 @@ def main(cfg: DictConfig):
             tta_mode=None,
             weight="pyramid",
             device=device,
-            filter_crops="cortex",
+            filter_crops="tissue",
             stats=stats,
         )
 

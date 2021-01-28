@@ -194,7 +194,9 @@ class TiffFile(Dataset):
             within_region = {"any": True}
 
             if self.filter_crops is not None:
-                within_any, within_cortex, within_region = self.is_within((iy0, iy1), (ix0, ix1))
+                within_any, within_cortex, within_region = self.is_within(
+                    (iy0, iy1), (ix0, ix1)
+                )
 
                 if (
                     # If cortex is present on the slide and crop is not in cortex, do not predict
@@ -262,7 +264,9 @@ class TiffFile(Dataset):
 
                 # TODO remove duplicated
                 if self.filter_crops is not None:
-                    within_any, within_cortex, within_region = self.is_within((iy0, iy1), (ix0, ix1))
+                    within_any, within_cortex, within_region = self.is_within(
+                        (iy0, iy1), (ix0, ix1)
+                    )
 
                     if (
                         # If cortex is present on the slide and crop is not in cortex, do not predict
