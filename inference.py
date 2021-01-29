@@ -171,7 +171,9 @@ def inference_one(
 
     if postprocess:
         # TODO investigate
-        min_glomerulus_area = 16384  # 23480 for val 7, 16972 for val 5 (remove_small_objects makes worse)
+        min_glomerulus_area = (
+            16384  # 23480 for val 7, 16972 for val 5 (remove_small_objects makes worse)
+        )
         merged = remove_small_objects(
             merged, min_size=min_glomerulus_area, in_place=True
         )

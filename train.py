@@ -73,7 +73,9 @@ def main(cfg: DictConfig):
 
     # Model
     print(
-        f"Setup model {cfg.model.arch} {cfg.model.encoder_name} convert_bn={cfg.model.convert_bn}"
+        f"Setup model {cfg.model.arch} {cfg.model.encoder_name} "
+        f"convert_bn={cfg.model.convert_bn} "
+        f"convert_bottleneck={cfg.model.convert_bottleneck} "
     )
     model = get_segmentation_model(
         arch=cfg.model.arch,
@@ -81,6 +83,7 @@ def main(cfg: DictConfig):
         encoder_weights=cfg.model.encoder_weights,
         classes=1,
         convert_bn=cfg.model.convert_bn,
+        convert_bottleneck=cfg.model.convert_bottleneck,
         # decoder_attention_type="scse",  # TODO to config
     )
     model = model.to(device)
@@ -348,7 +351,7 @@ def main(cfg: DictConfig):
             tile_size=cfg.data.tile_size,
             tile_step=cfg.data.tile_step,
             threshold=best_th,
-            save_raw=True,
+            save_raw=False,
             tta_mode=None,
             weight="pyramid",
             device=device,

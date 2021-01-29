@@ -4,7 +4,7 @@
 # Codebase copied from Catalyst
 
 from functools import partial
-from typing import Any
+from typing import Any, Callable, List
 
 import torch
 import torch.nn.functional as F
@@ -106,23 +106,35 @@ class LovaszLossBinary(_Loss):
 # Focal Tversky adopted from  https://github.com/nabsabraham/focal-tversky-unet/blob/master/losses.py
 
 
-def dice_score(outputs: T, targets: T, eps: float = 1):
+def dice(
+    outputs: T,
+    targets: T,
+    eps: float = 1e-7,
+    threshold: float = None,
+    activation: str = "Sigmoid",
+) -> T:
+    activation_fn = get_activation_fn(activation)
+    outputs = activation_fn(outputs)
+
+    if threshold is not None:
+        outputs = (outputs > threshold).float()
+
     intersection = torch.sum(targets * outputs)
     union = torch.sum(targets) + torch.sum(outputs)
     score = (2 * intersection + eps * (union == 0)) / (union + eps)
+
     return score
 
 
-def dice_loss(outputs: T, targets: T):
-    loss = 1 - dice_score(outputs, targets)
-    return loss
+def dice_loss(outputs: T, targets: T, **kwargs) -> T:
+    return 1 - dice(outputs, targets, **kwargs)
 
 
 def tversky(
     outputs: T,
     targets: T,
     alpha: float = 0.7,
-    eps: float = 1,
+    eps: float = 1e-7,
     threshold: float = None,
     activation: str = "Sigmoid",
 ) -> T:
@@ -135,45 +147,30 @@ def tversky(
     tp = torch.sum(targets * outputs)
     fn = torch.sum(targets * (1 - outputs))
     fp = torch.sum((1 - targets) * outputs)
-    return (tp + eps) / (tp + alpha * fn + (1 - alpha) * fp + eps)
+    dn = tp + alpha * fn + (1 - alpha) * fp
+    score = (tp + eps * (dn == 0)) / (dn + eps)
+
+    return score
 
 
 def tversky_loss(outputs, targets, **kwargs) -> T:
     return 1 - tversky(outputs, targets, **kwargs)
 
 
-def focal_tversky_loss(outputs: T, targets: T, gamma: float = 0.75, **kwargs: Any):
-    tl = tversky_loss(outputs, targets, **kwargs)
-    return tl ** gamma
+def focal_tversky_loss(
+    outputs: T,
+    targets: T,
+    gamma: float = 0.75,
+    **kwargs: Any
+):
+    return tversky_loss(outputs, targets, **kwargs) ** gamma
 
 
-class FocalTverskyLoss(nn.Module):
-    def __init__(
-        self,
-        eps: float = 1,
-        threshold: float = None,
-        activation: str = "Sigmoid",
-        alpha: float = 0.7,
-        gamma: float = 0.75,
-    ):
-        """
-
-        :param eps: smoothing parameter, default 1
-        :param threshold: threshold logits if necessary
-        :param activation: activation function
-        :param alpha: FN weight, when 0.5 - dice loss
-        :param gamma: focal exponent, when 1 - no effect
-        """
+class Loss(nn.Module):
+    def __init__(self, loss_fn: Callable, element_wise: bool = False, **kwargs: Any):
         super().__init__()
-
-        self.loss_fn = partial(
-            focal_tversky_loss,
-            eps=eps,
-            threshold=threshold,
-            activation=activation,
-            alpha=alpha,
-            gamma=gamma,
-        )
+        self.element_wise = element_wise
+        self.loss_fn = partial(loss_fn, **kwargs)
 
     def forward(self, logits: T, targets: T):
         """
@@ -182,6 +179,67 @@ class FocalTverskyLoss(nn.Module):
         :param targets: ground truth labels
         :return: computed loss
         """
+        assert logits.shape == targets.shape
+        # Iterate over batch dimension if element_wise
+        if not self.element_wise:
+            logits, targets = [logits], [targets]
+        loss = torch.stack([self.loss_fn(o, t) for o, t in zip(logits, targets)])
+        return loss.mean()
 
-        loss = self.loss_fn(logits, targets)
-        return loss
+
+class FocalTverskyLoss(Loss):
+    def __init__(
+        self,
+        eps: float = 1e-7,
+        threshold: float = None,
+        activation: str = "Sigmoid",
+        alpha: float = 0.7,
+        gamma: float = 0.75,
+        element_wise: bool = False,
+    ):
+        """
+        "A novel focal Tversky loss function and improved Attention U-Net for lesion segmentation"
+        https://arxiv.org/abs/1810.07842
+        https://github.com/nabsabraham/focal-tversky-unet
+
+        :param eps: smoothing parameter, default 1e-7
+        :param threshold: threshold logits if necessary
+        :param activation: activation function
+        :param alpha: FN weight, when 0.5 - dice loss
+        :param gamma: focal exponent, when 1 - no effect
+        :param element_wise: calculate by element in the batch, then average
+        """
+        super().__init__(
+            loss_fn=focal_tversky_loss,
+            element_wise=element_wise,
+            threshold=threshold,
+            activation=activation,
+            alpha=alpha,
+            gamma=gamma,
+            eps=eps,
+        )
+
+
+class DiceLoss(Loss):
+    def __init__(
+        self,
+        eps: float = 1e-7,
+        threshold: float = None,
+        activation: str = "Sigmoid",
+        element_wise: bool = False,
+    ):
+        """
+        Dice loss
+
+        :param eps: smoothing parameter, default 1e-7
+        :param threshold: threshold logits if necessary
+        :param activation: activation function
+        :param element_wise: calculate by element in the batch, then average
+        """
+        super().__init__(
+            loss_fn=dice_loss,
+            element_wise=element_wise,
+            threshold=threshold,
+            activation=activation,
+            eps=eps,
+        )

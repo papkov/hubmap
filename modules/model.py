@@ -17,6 +17,8 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+import modules.bottleneck_transformer as botnet
+
 
 @torch.no_grad()
 def find_dice_threshold(model: nn.Module, loader: DataLoader, device: str = "cuda"):
@@ -48,6 +50,13 @@ def get_scheduler(
     if name == "cosine":
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=num_epochs, eta_min=eta_min
+        )
+    elif name == "restarts":
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=num_epochs // 2,
+            T_mult=1,
+            eta_min=0,
         )
     elif name == "plateau":
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, **plateau)
@@ -95,6 +104,7 @@ def get_segmentation_model(
     pretrained_checkpoint_path: Optional[str] = None,
     checkpoint_path: Optional[Union[str, List[str]]] = None,
     convert_bn: Optional[str] = None,
+    convert_bottleneck: Tuple[int, int, int] = (0, 0, 0),
     **kwargs: Any,
 ) -> nn.Module:
     """
@@ -105,6 +115,7 @@ def get_segmentation_model(
     :param checkpoint_path:
     :param pretrained_checkpoint_path:
     :param convert_bn:
+    :param convert_bottleneck:
     :param kwargs:
     :return:
     """
@@ -159,6 +170,14 @@ def get_segmentation_model(
         )
         model.encoder.load_state_dict(state_dict)
         del state_dict
+
+    # TODO fmap_size=16 hardcoded for input 256
+    botnet.convert_resnet(
+        model.encoder,
+        replacement=convert_bottleneck,
+        fmap_size=16,
+        position_encoding=True,
+    )
 
     # TODO parametrize conversion
     print(f"Convert BN to {convert_bn}")
