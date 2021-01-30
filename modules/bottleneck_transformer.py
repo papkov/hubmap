@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 import torch
 from einops import rearrange, repeat
@@ -89,7 +89,7 @@ class Attention(nn.Module):
         self,
         *,
         dim: int,
-        fmap_size: int,
+        fmap_size: int = 64,
         heads: int = 4,
         dim_head: int = 128,
         position_encoding: Optional[str] = "relative",

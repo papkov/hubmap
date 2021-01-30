@@ -157,12 +157,7 @@ def tversky_loss(outputs, targets, **kwargs) -> T:
     return 1 - tversky(outputs, targets, **kwargs)
 
 
-def focal_tversky_loss(
-    outputs: T,
-    targets: T,
-    gamma: float = 0.75,
-    **kwargs: Any
-):
+def focal_tversky_loss(outputs: T, targets: T, gamma: float = 0.75, **kwargs: Any):
     return tversky_loss(outputs, targets, **kwargs) ** gamma
 
 

@@ -621,6 +621,7 @@ def get_data_loaders(
             num_workers=num_workers,
             pin_memory=True,
             drop_last=True,
+            shuffle=True,
         ),
         valid=DataLoader(
             valid_ds,
@@ -628,5 +629,6 @@ def get_data_loaders(
             num_workers=num_workers,
             pin_memory=True,
             drop_last=False,
+            shuffle=False,
         ),
     )

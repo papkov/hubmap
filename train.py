@@ -71,6 +71,9 @@ def main(cfg: DictConfig):
     else:
         transforms = D.get_training_augmentations()
 
+    if OmegaConf.is_missing(cfg.model, "convert_bottleneck"):
+        cfg.model.convert_bottleneck = (0, 0, 0)
+
     # Model
     print(
         f"Setup model {cfg.model.arch} {cfg.model.encoder_name} "
@@ -83,7 +86,7 @@ def main(cfg: DictConfig):
         encoder_weights=cfg.model.encoder_weights,
         classes=1,
         convert_bn=cfg.model.convert_bn,
-        convert_bottleneck=cfg.model.convert_bottleneck,
+        convert_bottleneck=cfg.model.convert_bottleneck
         # decoder_attention_type="scse",  # TODO to config
     )
     model = model.to(device)

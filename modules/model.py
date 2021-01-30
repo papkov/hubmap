@@ -171,12 +171,12 @@ def get_segmentation_model(
         model.encoder.load_state_dict(state_dict)
         del state_dict
 
-    # TODO fmap_size=16 hardcoded for input 256
+    # TODO fmap_size=16 hardcoded for input 256 (matters for positional encoding)
     botnet.convert_resnet(
         model.encoder,
         replacement=convert_bottleneck,
         fmap_size=16,
-        position_encoding=True,
+        position_encoding=None,
     )
 
     # TODO parametrize conversion
