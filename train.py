@@ -86,7 +86,7 @@ def main(cfg: DictConfig):
         encoder_weights=cfg.model.encoder_weights,
         classes=1,
         convert_bn=cfg.model.convert_bn,
-        convert_bottleneck=cfg.model.convert_bottleneck
+        convert_bottleneck=cfg.model.convert_bottleneck,
         # decoder_attention_type="scse",  # TODO to config
     )
     model = model.to(device)

@@ -432,15 +432,19 @@ def get_training_augmentations():
         [
             # albu.RandomCrop(256, 256),
             # did not work
+            # albu.MaskDropout(
+            #     max_objects=1, image_fill_value=[160, 115, 173]  #  HuBMAP
+            # ),
             # CopyPaste(pool_size=32),
-            # albu.MaskDropout(max_objects=1, image_fill_value="inpaint"),
             albu.HorizontalFlip(),
             albu.VerticalFlip(),
             albu.RandomRotate90(),
-            # albu.ShiftScaleRotate(scale_limit=0.1),
+            # albu.ShiftScaleRotate(scale_limit=(0.9, 1.1), rotate_limit=0),
             albu.RandomBrightnessContrast(brightness_limit=0.5, contrast_limit=0.5),
             albu.HueSaturationValue(
-                hue_shift_limit=20, sat_shift_limit=50, val_shift_limit=40  # was 40
+                hue_shift_limit=10,
+                sat_shift_limit=50,
+                val_shift_limit=50,  # was 40
             ),
         ]
     )

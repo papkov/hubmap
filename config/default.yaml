@@ -42,12 +42,12 @@ model:
   convert_bottleneck: [0, 0, 0]
 
 optim:
-  name: sgd
+  name: adam
   lookahead: False
-  lr: 0.1
-  wd: 0
-  lr_encoder: 0.1
-  wd_encoder: 0
+  lr: 1e-3
+  wd: 1e-4
+  lr_encoder: 1e-3
+  wd_encoder: 1e-4
   accumulate: 1
 
 loss:
@@ -59,7 +59,7 @@ loss:
 
 scheduler:
   type: cosine
-  eta_min_factor: 1e5
+  eta_min_factor: 200
   mode: batch  # batch | epoch
   plateau:
     patience: 5
@@ -71,7 +71,7 @@ scheduler:
 
 train:
   logdir: catalyst_log
-  num_epochs: [50] # for each size stage (single by default)
+  num_epochs: [40] # for each size stage (single by default)
   main_metric: dice
 
 checkpoint:

@@ -1,6 +1,6 @@
 import numpy as np
 from albumentations import DualTransform
-
+import cv2
 
 class CopyPaste(DualTransform):
     def __init__(self, always_apply: bool = False, p: float = 0.5, pool_size: int = 32):
@@ -34,7 +34,10 @@ class CopyPaste(DualTransform):
     def apply(self, img, **params):
         from_pool = np.random.choice(self.pool_size)
         self.last_sampled = self.pool.pop(from_pool)
-        mask = np.repeat(self.last_sampled["mask"][..., None], 3, -1) > 0
+        # TODO parametrize
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+        mask = cv2.dilate(self.last_sampled["mask"], kernel, iterations=1)
+        mask = np.repeat(mask[..., None], 3, -1) > 0
         np.putmask(img, mask, self.last_sampled["image"])
         return img
 
