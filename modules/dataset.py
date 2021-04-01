@@ -300,10 +300,22 @@ class TiffFile(Dataset):
         tile_width, tile_height = self.tiler.tile_size
 
         # Read window
-        tile = self.image.read(
-            [1, 2, 3],  # read all three channels
-            window=Window.from_slices((iy0, iy1), (ix0, ix1)),
-        ).astype(np.uint8)
+        if self.image.count == 3:
+            tile = self.image.read(
+                [1, 2, 3],  # read all three channels
+                window=Window.from_slices((iy0, iy1), (ix0, ix1)),
+            ).astype(np.uint8)
+        else:
+            # https://www.kaggle.com/c/hubmap-kidney-segmentation/discussion/224883
+            h = iy1 - iy0
+            w = ix1 - ix0
+            c = len(self.image.subdatasets)
+            tile = np.zeros((h, w, c), dtype=np.uint8)
+            for i, s in enumerate(self.image.subdatasets, 0):
+                with rasterio.open(s) as layer:
+                    tile[:, :, i] = layer.read(
+                        1, window=Window.from_slices((iy0, iy1), (ix0, ix1))
+                    ).astype(np.uint8)
 
         # Reshape if necessary
         if tile.shape[-1] != 3:

@@ -1,6 +1,7 @@
+import cv2
 import numpy as np
 from albumentations import DualTransform
-import cv2
+
 
 class CopyPaste(DualTransform):
     def __init__(self, always_apply: bool = False, p: float = 0.5, pool_size: int = 32):
