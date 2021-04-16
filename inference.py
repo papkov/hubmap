@@ -150,7 +150,8 @@ def inference_one(
             # TODO align_corners=True seems a bit better on val=7, check
             pred_batch = interpolate(
                 pred_batch,
-                scale_factor=1 / test_ds.scale_factor,
+                # assume that scale factor is always 1/int
+                scale_factor=round(1 / test_ds.scale_factor, 4),
                 mode=interpolate_mode,
                 align_corners=True,
             )
