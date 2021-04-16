@@ -373,14 +373,23 @@ class TiffFile(Dataset):
         plt.legend()
 
     def is_within(
-        self, y: Tuple[int, int], x: Tuple[int, int]
+        self,
+        y: Tuple[int, int],
+        x: Tuple[int, int],
+        expansion: int = 0,
     ) -> Tuple[bool, bool, Dict[str, bool]]:
         """
         Check if tile corners are within anatomical structure
         :params y: tuple (y0, y1)
         :params x: tuple (x0, x1)
+        :params expansion: how much to expand tile boundaries (allows including more tiles in the region)
         :return: (bool within_any, dict within_region)
         """
+        if expansion != 0:
+            # expand tile boundaries
+            y = (min(0, y[0] - expansion), y[1] + expansion)
+            x = (min(0, x[0] - expansion), x[1] + expansion)
+
         if self.anatomical_structure is None:
             # do not proceed without anatomical structure
             return True, True, {"any": True}
