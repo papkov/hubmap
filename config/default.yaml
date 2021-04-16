@@ -16,9 +16,9 @@ data:
   scale_factor: 0.25
   tile_size: 1024  # in original scale
   tile_step: 704 # can consider 576 as well, previously was 896
-  train_ids: [0, 1, 2, 3, 4, 5, 6]
-  valid_ids: [7]  # Should always be a list
-  valid_split: 0.1  # Use when valid_ids is empty
+  train_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+  valid_ids: [14]  # Should always be a list
+  valid_split: 0.1  # Used when valid_ids is empty
 #  mean: [0.65459856, 0.48386562, 0.69428385]  # HuBMAP
 #  std: [0.15167958, 0.23584107, 0.13146145]
   mean: [0.62642119, 0.45024076, 0.67996012]  # HuBMAP only tissue regions
@@ -35,10 +35,9 @@ loader:
 
 model:
   arch: unet
-  encoder_name: se_resnext50_32x4d
-#  encoder_name: timm-skresnext50_32x4d
+  encoder_name: efficientnet-b2
   encoder_weights: imagenet
-  convert_bn: gnet  # {False, group, instance, bnet, gnet}
+  convert_bn: None  # {False, group, instance, bnet, gnet}
   convert_bottleneck: [0, 0, 0]
 
 optim:
