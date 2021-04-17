@@ -1,5 +1,6 @@
 import os
 import random
+from copy import copy
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
@@ -9,6 +10,8 @@ import rasterio
 import torch
 from rasterio.enums import Resampling
 from rasterio.io import DatasetReader
+
+from modules.dataset import Denormalize
 
 
 def read_opened_rasterio(rasterio_image: DatasetReader, scale_factor: float = 1.0):
@@ -61,14 +64,14 @@ def rle_encode_less_memory(pixels):
     return " ".join(str(x) for x in runs)
 
 
-def rle_decode(mask_rle, shape=(256, 256)):
+def rle_decode(mask_rle: Union[str, np.ndarray], shape=(256, 256)):
     """
     https://www.kaggle.com/finlay/pytorch-fcn-resnet50-in-20-minute
     mask_rle: run-length as string formatted (start length)
     shape: (height,width) of array to return
     Returns numpy array, 1 - mask, 0 - background
     """
-    s = mask_rle.split()
+    s = mask_rle.split() if isinstance(mask_rle, str) else mask_rle
     starts, lengths = [np.asarray(x, dtype=int) for x in (s[0:][::2], s[1:][::2])]
     starts -= 1
     ends = starts + lengths
@@ -76,6 +79,73 @@ def rle_decode(mask_rle, shape=(256, 256)):
     for lo, hi in zip(starts, ends):
         img[lo:hi] = 1
     return img.reshape(shape, order="F")
+
+
+def rle_crop(
+    rle_full: Union[str, np.ndarray],
+    iy0: int,
+    iy1: int,
+    ix0: int,
+    ix1: int,
+    image_shape: Tuple[int, int],
+) -> np.ndarray:
+    """
+    Crop a tile from RLE-encoded mask without allocating memory for the full-sized array
+    :param rle_full: RLE-encoded mask as str of array
+    :param iy0: coordinates to crop (inclusive)
+    :param iy1:
+    :param ix0:
+    :param ix1:
+    :param image_shape: shape of the full-size mask
+    :return: binary mask of shape (iy1 - iy0, ix1 - ix0)
+    """
+    rle = copy(rle_full)
+    if isinstance(rle, str):
+        rle = np.array(rle.split(), dtype=int)
+    if rle.ndim == 1:
+        rle = rle.reshape(-1, 2)
+    # shift to zero-base
+    rle[:, 0] -= 1
+
+    rows, cols = image_shape
+    h = iy1 - iy0
+    w = ix1 - ix0
+
+    # filter out entries that are outside the region for sure
+    start = rows * ix0 + iy0  # start of the tile column
+    end = rows * ix1 + iy1  # end of the tile column
+    subset = (rle.sum(1) > start) & (rle[:, 0] < end)
+    if subset.sum() > 0:
+        rle = rle[subset]
+
+    rle_mask = []
+    rle_ends = rle.sum(1)  # ends of encoding segments
+
+    # iterate over columns (RLE uses column-major order)
+    for i, x in enumerate(range(ix0, ix1)):
+        start = rows * x + iy0  # start of the tile column
+        end = rows * x + iy1  # end of the tile column
+        subset = (rle_ends > start) & (rle[:, 0] < end)
+        if subset.sum() > 0:
+            rle_subset = rle[subset]
+            rle_subset[:, 0] += -start
+            # trim segments start if start < 0
+            shift = -np.minimum(rle_subset[:, 0], 0)
+            rle_subset[:, 1] -= shift
+            rle_subset[:, 0] += shift + i * h  # also shift by column coordinate
+            # trim segment end if c + l > end
+            rle_subset[:, 1] -= np.maximum(rle_subset.sum(1) - (end - start + i * h), 0)
+            assert np.all(rle_subset >= 0)
+            rle_mask.append(rle_subset)
+
+    if not rle_mask:
+        return np.zeros((h, w), dtype=np.uint8)
+
+    rle_mask = np.concatenate(rle_mask, 0)
+    # shift to one-base
+    rle_mask[:, 0] += 1
+    mask = rle_decode(rle_mask.flatten(), (h, w))
+    return mask
 
 
 def set_device_id(device_id: Optional[Union[int, str]] = None) -> str:
@@ -133,3 +203,20 @@ def polygon2mask(anatomical_structure: List[Dict[str, Any]], shape: Tuple[int, i
             coords = np.array(coords, dtype=np.int32).squeeze()[None, ...]
             cv2.fillPoly(mask, coords, i + 1)
     return mask.astype(np.uint8)
+
+
+def plot_batch(
+    batch,
+    nrows: int = 4,
+    s: int = 2,
+    mean: Tuple[float, ...] = (0.485, 0.456, 0.406),
+    std: Tuple[float, ...] = (0.229, 0.224, 0.225),
+):
+    bs = len(batch["image"])
+    denormalize = Denormalize(mean=mean, std=std)
+    ncols = bs // nrows
+    fig, axes = plt.subplots(ncols=ncols, nrows=nrows, figsize=(s * ncols, s * nrows))
+    for i, ax in enumerate(axes.flat):
+        ax.imshow(denormalize(batch["image"][i]))
+        ax.imshow(batch["mask"][i][0], alpha=0.3)
+    clean_plot(axes)

@@ -1,5 +1,6 @@
 import json
 from collections import OrderedDict
+from copy import copy
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
@@ -10,6 +11,7 @@ import cv2
 import matplotlib.path as mpath
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import rasterio
 from albumentations.pytorch.transforms import ToTensorV2
 from PIL import Image
@@ -17,7 +19,7 @@ from pytorch_toolbelt.inference.tiles import ImageSlicer
 from rasterio.windows import Window
 from sklearn.model_selection import train_test_split
 from torch import Tensor as T
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from tqdm.auto import tqdm
 
 from modules import util
@@ -44,6 +46,9 @@ class TrainDataset(Dataset):
 
         assert len(self.images) == len(self.masks)
         self.to_tensor = ToTensorV2()
+        self.dmean = copy(self.mean)
+        self.dstd = copy(self.std)
+        self.denormalize = Denormalize(mean=self.mean, std=self.std)
 
     def __getitem__(self, i: int):
         image_id = str(self.images[i]).split("/")[-1].split("_")[0]
@@ -56,10 +61,11 @@ class TrainDataset(Dataset):
             sample = self.transforms(**sample)
 
         if self.stats is not None and image_id in self.stats:
-            sample["image"] = albu.normalize(sample["image"], **self.stats[image_id])
+            self.mean, self.std = self.stats[image_id]
         else:
-            sample["image"] = albu.normalize(sample["image"], self.mean, self.std)
+            self.mean, self.std = copy(self.dmean), copy(self.dstd)
 
+        sample["image"] = albu.normalize(sample["image"], self.mean, self.std)
         sample = self.to_tensor(**sample)
 
         ret = {
@@ -131,11 +137,12 @@ class TiffFile(Dataset):
     weight: str = "pyramid"
     anatomical_structure: Optional[List[Dict[str, Any]]] = None
     filter_crops: Optional[str] = None  # "cortex" | "tissue"
-    padding_mode = "constant"
+    padding_mode: str = "constant"
+    rle_mask: Optional[Union[str, Array]] = None
 
     def __post_init__(self):
         # Get image hash name
-        self.image_hash = self.path.split("/")[-1].split(".")[0]
+        self.image_hash = str(self.path).split("/")[-1].split(".")[0]
 
         # Read anatomical structure
         self.regions = []
@@ -180,44 +187,113 @@ class TiffFile(Dataset):
         self.within_any = []
         self.within_region = []
         for i, crop in enumerate(self.tiler.crops):
-            if self.random_crop:
-                crop = [
-                    np.random.randint(0, shape - ts - 1)
-                    for shape, ts in zip(self.image.shape, self.tiler.tile_size)
-                ]
-            (ic0, ic1), (tc0, tc1), crop = self.tiler.project_crop_to_tile(crop)
-            (iy0, ix0), (iy1, ix1) = tuple(ic0), tuple(ic1)
-            (ty0, tx0), (ty1, tx1) = tuple(tc0), tuple(tc1)
+            ic, tc, crop, within_any, within_region, use_crop = self.process_tiler_crop(
+                crop if not self.random_crop else None
+            )
+            if use_crop:
+                self.batch_crops.append(crop)
+                self.crops.append((ic, tc))
+                self.within_any.append(within_any)
+                self.within_region.append(within_region)
 
-            # Check if a tile belongs to a region within the structure
-            within_any = (True,)
-            within_region = {"any": True}
-
-            if self.filter_crops is not None:
-                within_any, within_cortex, within_region = self.is_within(
-                    (iy0, iy1), (ix0, ix1)
-                )
-
-                if (
-                    # If cortex is present on the slide and crop is not in cortex, do not predict
-                    self.filter_crops == "cortex"
-                    and self.cortex
-                    and not within_cortex
-                    # If crop is not within any region, do not predict
-                ) or not within_any:
-                    continue
-
-            self.batch_crops.append(self.tiler.crops[i])
-            self.crops.append(((ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1)))
-            self.within_any.append(within_any)
-            self.within_region.append(within_region)
+        # Process RLE mask for convenience
+        if self.rle_mask is not None and isinstance(self.rle_mask, str):
+            # reshape to (N, 2) with columns (coordinate, length)
+            self.rle_mask = np.array(self.rle_mask.split(), dtype=int).reshape(-1, 2)
 
         print("Dataset initialized")
 
-    def __len__(self):
+    def read_rle_crop(
+        self, ix0: int, ix1: int, iy0: int, iy1: int
+    ) -> Union[Array, None]:
+        """
+        Extracts a piece of RLE mask by coordinates and converts it to binary mask
+        :param ix0: crop coordinates in original image
+        :param ix1:
+        :param iy0:
+        :param iy1:
+        :return: binary np.array of tile size or None if no mask
+        """
+        if self.rle_mask is None:
+            return None
+        return util.rle_crop(
+            self.rle_mask,
+            ix0=ix0,
+            ix1=ix1,
+            iy0=iy0,
+            iy1=iy1,
+            image_shape=self.image.shape,
+        )
+
+    def process_tiler_crop(
+        self, crop: Optional[List[int]] = None
+    ) -> Tuple[
+        Tuple[int, ...], Tuple[int, ...], List[int], bool, Dict[str, bool], bool
+    ]:
+        """
+        Processes tiler crop or generates a new one
+        :param crop: crop coordinates from Tiler, generate random if None
+        :return:
+            ic, coordinates (ix0, ix1, iy0, iy1) in original image
+            tc, coordinates (tx0, tx1, ty0, ty1) in tile
+            crop, coordinates [x, y] of top left angle of the original crop, generated randomly
+            within_any, bool
+            within_region, Dict[str, bool]
+            use_crop, bool, whether to use this crop (not filtered out)
+        """
+
+        if crop is None:
+            # generate random crop
+            # TODO move randomness to getitem
+            crop = [
+                np.random.randint(0, shape - ts - 1)
+                for shape, ts in zip(self.image.shape, self.tiler.tile_size)
+            ]
+        (ic0, ic1), (tc0, tc1), crop = self.tiler.project_crop_to_tile(crop)
+        (iy0, ix0), (iy1, ix1) = tuple(ic0), tuple(ic1)
+        (ty0, tx0), (ty1, tx1) = tuple(tc0), tuple(tc1)
+
+        # Check if a tile belongs to a region within the structure
+        within_any, within_region, use_crop = self.check_use_crop(ix0, ix1, iy0, iy1)
+        ic, tc = (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1)
+        return ic, tc, crop, within_any, within_region, use_crop
+
+    def check_use_crop(self, ix0: int, ix1: int, iy0: int, iy1: int):
+        """
+        Check if crop is within some region and should be used
+        :param ix0: coordinates in original image
+        :param ix1:
+        :param iy0:
+        :param iy1:
+        :return:
+            within_any, bool
+            within_region, Dict[str, bool]
+            use_crop, bool, whether to use this crop (not filtered out)
+        """
+        within_any = (True,)
+        within_region = {"any": True}
+        use_crop = True
+
+        if self.filter_crops is not None:
+            within_any, within_cortex, within_region = self.is_within(
+                y=(iy0, iy1), x=(ix0, ix1)
+            )
+
+            if (
+                # If cortex is present on the slide and crop is not in cortex, do not predict
+                self.filter_crops == "cortex"
+                and self.cortex
+                and not within_cortex
+                # If crop is not within any region, do not predict
+            ) or not within_any:
+                use_crop = False
+
+        return within_any, within_region, use_crop
+
+    def __len__(self) -> int:
         return len(self.crops)
 
-    def close(self):
+    def close(self) -> None:
         self.image.close()
 
     def compute_image_stats(
@@ -258,32 +334,21 @@ class TiffFile(Dataset):
                     ((ty0, tx0), (ty1, tx1)),
                     crop,
                 ) = non_overlapping_tiler.project_crop_to_tile(crop)
-                crop = self.read_crop(
+                crop, mask = self.read_crop(
                     ((ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1)), pad_and_resize=False
                 )
 
-                # TODO remove duplicated
-                if self.filter_crops is not None:
-                    within_any, within_cortex, within_region = self.is_within(
-                        (iy0, iy1), (ix0, ix1)
-                    )
+                within_any, within_region, use_crop = self.check_use_crop(
+                    ix0, ix1, iy0, iy1
+                )
 
-                    if (
-                        # If cortex is present on the slide and crop is not in cortex, do not predict
-                        self.filter_crops == "cortex"
-                        and self.cortex
-                        and not within_cortex
-                        # If crop is not within any region, do not predict
-                    ) or not within_any:
-                        continue
-
-                # s = crop.sum(axis=(0, 1)) / 255
-                # sum_x += s
-                # sum_x2 += s ** 2
-                # n += np.product(crop.shape[:2])
-
-                means.append(crop.mean(axis=(0, 1)) / 255)
-                stds.append(crop.std(axis=(0, 1)) / 255)
+                if use_crop:
+                    # s = crop.sum(axis=(0, 1)) / 255
+                    # sum_x += s
+                    # sum_x2 += s ** 2
+                    # n += np.product(crop.shape[:2])
+                    means.append(crop.mean(axis=(0, 1)) / 255)
+                    stds.append(crop.std(axis=(0, 1)) / 255)
 
             # mean = sum_x / n
             # std = np.sqrt((sum_x2 / n) - (mean * mean))
@@ -293,7 +358,7 @@ class TiffFile(Dataset):
 
     def read_crop(
         self, crop: Tuple[Tuple[int, ...], Tuple[int, ...]], pad_and_resize: bool = True
-    ) -> Array:
+    ) -> Tuple[Array, Array]:
         (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = crop
 
         # Allocate tile
@@ -321,6 +386,9 @@ class TiffFile(Dataset):
         if tile.shape[-1] != 3:
             tile = np.moveaxis(tile, 0, -1)
 
+        # Read mask
+        mask = self.read_rle_crop(ix0, ix1, iy0, iy1)
+
         if pad_and_resize:
             pad_width = [
                 (ty0, self.tile_size - ty1),
@@ -331,29 +399,65 @@ class TiffFile(Dataset):
             tile = np.pad(tile, pad_width=pad_width, mode=self.padding_mode)
             assert tile.shape == (self.tile_size, self.tile_size, 3)
 
+            if mask is not None:
+                mask = np.pad(mask, pad_width=pad_width[:-1], mode=self.padding_mode)
+                assert mask.shape == (
+                    self.tile_size,
+                    self.tile_size,
+                ), f"{mask.shape}, {self.tile_size}"
+
             # Scale the tile
             tile = cv2.resize(
                 tile,
-                (
-                    int(tile_width * self.scale_factor),
-                    int(tile_height * self.scale_factor),
-                ),
+                None,
+                fx=self.scale_factor,
+                fy=self.scale_factor,
                 interpolation=cv2.INTER_AREA,
             )
 
-        return tile
+            if mask is not None:
+                mask = cv2.resize(
+                    mask,
+                    None,
+                    fx=self.scale_factor,
+                    fy=self.scale_factor,
+                    interpolation=cv2.INTER_NEAREST,
+                )
+        return tile, mask
 
     def __getitem__(self, i: int) -> Dict[str, Any]:
-        (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = self.crops[i]
-        tile = self.read_crop(self.crops[i])
+
+        ic, tc = self.crops[i]
+        crop = self.batch_crops[i]
+        within_any = self.within_any[i]
+        within_region = self.within_region[i]
+
+        # update all the values for true randomness
+        if self.random_crop:
+            use_crop = False
+            while not use_crop:
+                (
+                    ic,
+                    tc,
+                    crop,
+                    within_any,
+                    within_region,
+                    use_crop,
+                ) = self.process_tiler_crop()
+
+        tile, mask = self.read_crop((ic, tc))
+        (ix0, ix1, iy0, iy1), (tx0, tx1, ty0, ty1) = ic, tc
 
         ret = {
+            "i": i,
+            "image_id": self.image_hash,
             "image": tile,
-            "crop": self.batch_crops[i],
+            "mask": mask,
+            "crop": crop,
             "tile_crop": (ix0, ix1, iy0, iy1, tx0, tx1, ty0, ty1),
-            "within_any": self.within_any[i],
+            "within_any": within_any,
         }
-        ret.update(self.within_region[i])
+        ret.update(within_region)
         return ret
 
     def plot_structure(self):
@@ -413,6 +517,87 @@ class TiffFile(Dataset):
             ]
         )
         return within_any, within_cortex, within_region
+
+
+@dataclass
+class TrainTiffDataset(Dataset):
+    path_data: PathT = "data"
+    drop_ids: Optional[Tuple[str]] = None
+    mean: Tuple[float] = (0.485, 0.456, 0.406)
+    std: Tuple[float] = (0.229, 0.224, 0.225)
+    tile_size: Union[Tuple[int, int], int] = 1024
+    tile_step: Union[Tuple[int, int], int] = 1024
+    scale_factor: float = 1
+    random_crop: bool = False
+    num_threads: Union[str, int] = "all_cpus"
+    filter_crops: Optional[str] = None  # "cortex" | "tissue"
+    stats_file: Optional[str] = None
+    transforms: Optional[Union[albu.BasicTransform, Any]] = None
+
+    def __post_init__(self):
+        self.path_data = Path(self.path_data)
+
+        # read csv index for train and test (pseudolabels for test)
+        self.index = []
+        for split in ["train", "test"]:
+            if (self.path_data / f"{split}.csv").exists():
+                ind = pd.read_csv(self.path_data / f"{split}.csv")
+                ind["split"] = split
+                if self.drop_ids is not None:
+                    ind = ind.loc[~ind["id"].isin(self.drop_ids), :]
+                self.index.append(ind)
+        self.index = pd.concat(self.index).reset_index()
+
+        # concatenate tiff datasets
+        self.dataset = ConcatDataset(
+            [
+                TiffFile(
+                    path=self.path_data / f"{r['split']}/{r['id']}.tiff",
+                    tile_size=self.tile_size,
+                    tile_step=self.tile_step,
+                    scale_factor=self.scale_factor,
+                    random_crop=self.random_crop,
+                    num_threads=self.num_threads,
+                    filter_crops=self.filter_crops,
+                    rle_mask=r["encoding"],
+                )
+                for i, r in self.index.iterrows()
+            ]
+        )
+
+        # read stats if needed
+        self.stats = None
+        if self.stats_file:
+            with open(self.stats_file, "r") as f:
+                self.stats = json.load(f)
+
+        self.to_tensor = ToTensorV2()
+        self.dmean = copy(self.mean)
+        self.dstd = copy(self.std)
+        self.denormalize = Denormalize(mean=self.mean, std=self.std)
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, i: int) -> Dict[str, Any]:
+        ret = self.dataset[i]
+        sample = {k: v for k, v in ret.items() if k in ["image", "mask"]}
+        if self.transforms is not None:
+            sample = self.transforms(**sample)
+
+        if self.stats is not None and ret["image_id"] in self.stats:
+            self.mean, self.std = self.stats[ret["image_id"]]
+        else:
+            self.mean, self.std = copy(self.dmean), copy(self.dstd)
+
+        sample["image"] = albu.normalize(sample["image"], self.mean, self.std)
+
+        sample = self.to_tensor(**sample)
+        sample["image"] = sample["image"].float()
+        sample["mask"] = sample["mask"].float().unsqueeze(0)
+
+        sample.update({k: v for k, v in ret.items() if k in ["i", "image_id"]})
+        return sample
 
 
 @dataclass
@@ -531,16 +716,25 @@ def get_file_paths(
     :return:
     """
     path = Path(path)
-    unique_ids = sorted(
-        set(str(p).split("/")[-1].split("_")[0] for p in (path / "train").iterdir())
-    )
+    unique_ids = sorted(set(p.name.split("_")[0] for p in (path / "train").iterdir()))
+    # print(unique_ids)
 
     images = sorted(
-        [p for i in use_ids for p in (path / "train").glob(f"{unique_ids[i]}_*.png")]
+        [
+            p
+            for i in use_ids
+            for p in (path / "train").glob(f"{unique_ids[i]}_*.png")
+            if i < len(unique_ids)
+        ]
     )
 
     masks = sorted(
-        [p for i in use_ids for p in (path / "masks").glob(f"{unique_ids[i]}_*.png")]
+        [
+            p
+            for i in use_ids
+            for p in (path / "masks").glob(f"{unique_ids[i]}_*.png")
+            if i < len(unique_ids)
+        ]
     )
 
     assert len(images) == len(masks)
@@ -579,17 +773,35 @@ def get_train_valid_datasets(
     valid_masks: List[Path],
     mean: Tuple[float],
     std: Tuple[float],
+    scale: float = 0.5,
+    path_tiff_data: Optional[str] = None,
     transforms: Optional[Union[albu.BasicTransform, Any]] = None,
     stats: Optional[str] = None,
 ) -> Tuple[TrainDataset, TrainDataset]:
-    train_ds = TrainDataset(
-        images=train_images,
-        masks=train_masks,
-        mean=mean,
-        std=std,
-        transforms=transforms,
-        stats_file=stats,
-    )
+
+    if path_tiff_data is None:
+        train_ds = TrainDataset(
+            images=train_images,
+            masks=train_masks,
+            mean=mean,
+            std=std,
+            transforms=transforms,
+            stats_file=stats,
+        )
+    else:
+        drop_ids = tuple(set([fp.name.split("_")[0] for fp in valid_images]))
+        train_ds = TrainTiffDataset(
+            path_data=path_tiff_data,
+            mean=mean,
+            std=std,
+            transforms=transforms,
+            stats_file=stats,
+            scale_factor=scale,
+            drop_ids=drop_ids,
+            # TODO specify dict params
+            filter_crops="tissue",
+            random_crop=True,
+        )
     valid_ds = TrainDataset(
         images=valid_images,
         masks=valid_masks,
@@ -603,15 +815,22 @@ def get_train_valid_datasets(
 
 def get_train_valid_datasets_from_path(
     path: Path,
-    train_ids: Tuple[int],
     mean: Tuple[float],
     std: Tuple[float],
+    train_ids: Tuple[int],
     valid_ids: Optional[Tuple[int]] = None,
+    path_tiff_data: Optional[str] = None,
+    scale: float = 0.5,
     seed: int = 56,
     valid_split: float = 0.1,
     transforms: Optional[Union[albu.BasicTransform, Any]] = None,
     stats: Optional[str] = None,
-):
+) -> Tuple[Union[TrainDataset, TrainTiffDataset], TrainDataset]:
+
+    if valid_ids is None and path_tiff_data:
+        print("Set path_tiff_data=None, because valid_ids not provided")
+        path_tiff_data = None
+
     train_images, valid_images, train_masks, valid_masks = get_train_valid_path(
         path=path,
         train_ids=train_ids,
@@ -624,6 +843,8 @@ def get_train_valid_datasets_from_path(
         train_masks=train_masks,
         valid_images=valid_images,
         valid_masks=valid_masks,
+        path_tiff_data=path_tiff_data,
+        scale=scale,
         mean=mean,
         std=std,
         transforms=transforms,
@@ -633,7 +854,7 @@ def get_train_valid_datasets_from_path(
 
 
 def get_data_loaders(
-    train_ds: TrainDataset,
+    train_ds: Union[TrainDataset, TrainTiffDataset],
     valid_ds: TrainDataset,
     train_bs: int,
     valid_bs: int,
@@ -643,7 +864,8 @@ def get_data_loaders(
         train=DataLoader(
             train_ds,
             batch_size=train_bs,
-            num_workers=num_workers,
+            # set num_workers=0 for tiff because of rasterio
+            num_workers=num_workers if isinstance(train_ds, TrainDataset) else 0,
             pin_memory=True,
             drop_last=True,
             shuffle=True,
