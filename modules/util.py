@@ -1,6 +1,7 @@
 import os
 import random
 from copy import copy
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
@@ -10,8 +11,7 @@ import rasterio
 import torch
 from rasterio.enums import Resampling
 from rasterio.io import DatasetReader
-
-from modules.dataset import Denormalize
+from torch import Tensor as T
 
 
 def read_opened_rasterio(rasterio_image: DatasetReader, scale_factor: float = 1.0):
@@ -220,3 +220,20 @@ def plot_batch(
         ax.imshow(denormalize(batch["image"][i]))
         ax.imshow(batch["mask"][i][0], alpha=0.3)
     clean_plot(axes)
+
+
+@dataclass
+class Denormalize:
+    mean: Tuple[float] = (0.485, 0.456, 0.406)
+    std: Tuple[float] = (0.229, 0.224, 0.225)
+
+    def __call__(self, tensor: T, numpy: bool = True) -> Union[T, np.ndarray]:
+        """
+        :param tensor: image of size (C, H, W) to be normalized
+        :return: normalized image
+        """
+        for t, m, s in zip(tensor, self.mean, self.std):
+            t.mul_(s).add_(m)
+        if numpy:
+            tensor = np.moveaxis(tensor.numpy(), 0, -1)
+        return tensor

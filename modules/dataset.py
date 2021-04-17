@@ -48,7 +48,7 @@ class TrainDataset(Dataset):
         self.to_tensor = ToTensorV2()
         self.dmean = copy(self.mean)
         self.dstd = copy(self.std)
-        self.denormalize = Denormalize(mean=self.mean, std=self.std)
+        self.denormalize = util.Denormalize(mean=self.mean, std=self.std)
 
     def __getitem__(self, i: int):
         image_id = str(self.images[i]).split("/")[-1].split("_")[0]
@@ -574,7 +574,7 @@ class TrainTiffDataset(Dataset):
         self.to_tensor = ToTensorV2()
         self.dmean = copy(self.mean)
         self.dstd = copy(self.std)
-        self.denormalize = Denormalize(mean=self.mean, std=self.std)
+        self.denormalize = util.Denormalize(mean=self.mean, std=self.std)
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -618,7 +618,7 @@ class TestDataset(TiffFile):
         self.transforms = albu.Compose(
             [albu.Normalize(mean=self.mean, std=self.std), ToTensorV2()]
         )
-        self.denormalize = Denormalize(mean=self.mean, std=self.std)
+        self.denormalize = util.Denormalize(mean=self.mean, std=self.std)
 
     def __getitem__(self, i: int) -> Dict[str, Any]:
         ret = super().__getitem__(i)
@@ -686,23 +686,6 @@ def get_training_augmentations():
     #         ),
     #     ]
     # )
-
-
-@dataclass
-class Denormalize:
-    mean: Tuple[float] = (0.485, 0.456, 0.406)
-    std: Tuple[float] = (0.229, 0.224, 0.225)
-
-    def __call__(self, tensor: T, numpy: bool = True):
-        """
-        :param tensor: image of size (C, H, W) to be normalized
-        :return: normalized image
-        """
-        for t, m, s in zip(tensor, self.mean, self.std):
-            t.mul_(s).add_(m)
-        if numpy:
-            tensor = np.moveaxis(tensor.numpy(), 0, -1)
-        return tensor
 
 
 def get_file_paths(
