@@ -689,53 +689,65 @@ def get_training_augmentations():
 
 
 def get_file_paths(
-    path: PathT = "data/hubmap-256x256/",
-    use_ids: Tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7),
-) -> Tuple[List[Path], List[Path], List[str]]:
+    paths: Union[PathT, List[PathT]] = "data/hubmap-256x256/",
+    use_ids: Union[Tuple[int, ...], List[Tuple[int, ...]]] = (0, 1, 2, 3, 4, 5, 6, 7),
+) -> Tuple[List[Path], List[Path], List[List[str]]]:
     """
     Get lists of paths to training images and masks
-    :param path: path to the data
+    :param paths: path to the data, can be a list
     :param use_ids: ids to use
     :return:
     """
-    path = Path(path)
-    unique_ids = sorted(set(p.name.split("_")[0] for p in (path / "train").iterdir()))
+    if not isinstance(paths, list):
+        paths = [paths]
+        use_ids = [use_ids]
+    else:
+        assert isinstance(use_ids, list)
+        assert len(use_ids) == len(paths)
+
+    paths = [Path(p) for p in paths]
+    unique_ids = [
+        sorted(set(p.name.split("_")[0] for p in (path / "train").iterdir()))
+        for path in paths
+    ]
     # print(unique_ids)
 
     images = sorted(
         [
             p
-            for i in use_ids
-            for p in (path / "train").glob(f"{unique_ids[i]}_*.png")
-            if i < len(unique_ids)
+            for j, (use_id_p, path) in enumerate(zip(use_ids, paths))
+            for i in use_id_p
+            for p in (path / "train").glob(f"{unique_ids[j][i]}_*.png")
         ]
     )
 
     masks = sorted(
         [
             p
-            for i in use_ids
-            for p in (path / "masks").glob(f"{unique_ids[i]}_*.png")
-            if i < len(unique_ids)
+            for j, (use_id_p, path) in enumerate(zip(use_ids, paths))
+            for i in use_id_p
+            for p in (path / "masks").glob(f"{unique_ids[j][i]}_*.png")
         ]
     )
 
-    assert len(images) == len(masks)
+    assert len(images) == len(masks), f"images {len(images)}, masks {len(masks)}"
 
     return images, masks, unique_ids
 
 
 def get_train_valid_path(
-    path: Path,
-    train_ids: Tuple[int],
-    valid_ids: Optional[Tuple[int]] = None,
+    paths: Union[PathT, List[PathT]],
+    train_ids: Union[Tuple[int, ...], List[Tuple[int, ...]]],
+    valid_ids: Optional[Union[Tuple[int, ...], List[Tuple[int, ...]]]] = None,
     seed: int = 56,
     valid_split: float = 0.1,
 ):
-    train_images, train_masks, unique_ids = get_file_paths(path=path, use_ids=train_ids)
+    train_images, train_masks, unique_ids = get_file_paths(
+        paths=paths, use_ids=train_ids
+    )
     if valid_ids is not None:
         print(f"Use ids {valid_ids} for validation")
-        valid_images, valid_masks, _ = get_file_paths(path=path, use_ids=valid_ids)
+        valid_images, valid_masks, _ = get_file_paths(paths=paths, use_ids=valid_ids)
     else:
         print("Use random stratified split")
         hashes = [str(img).split("/")[-1].split("_")[0] for img in train_images]
@@ -797,11 +809,11 @@ def get_train_valid_datasets(
 
 
 def get_train_valid_datasets_from_path(
-    path: Path,
+    path: Union[PathT, List[PathT]],
     mean: Tuple[float],
     std: Tuple[float],
-    train_ids: Tuple[int],
-    valid_ids: Optional[Tuple[int]] = None,
+    train_ids: Union[Tuple[int, ...], List[Tuple[int, ...]]],
+    valid_ids: Optional[Union[Tuple[int, ...], List[Tuple[int, ...]]]] = None,
     path_tiff_data: Optional[str] = None,
     scale: float = 0.5,
     seed: int = 56,
@@ -815,7 +827,7 @@ def get_train_valid_datasets_from_path(
         path_tiff_data = None
 
     train_images, valid_images, train_masks, valid_masks = get_train_valid_path(
-        path=path,
+        paths=path,
         train_ids=train_ids,
         valid_ids=valid_ids,
         seed=seed,
