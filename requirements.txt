@@ -1,9 +1,9 @@
 pretrainedmodels==0.7.4
-timm==0.3.2
+timm @ git+git://github.com/rwightman/pytorch-image-models@9a1bd358c7e998799eed88b29842e3c9e5483e34
 efficientnet-pytorch==0.6.3
-git+https://github.com/qubvel/segmentation_models.pytorch
+segmentation_models_pytorch @ git+https://github.com/papkov/segmentation_models.pytorch
 omegaconf>=2.0.5
-git+https://github.com/papkov/pytorch-toolbelt
+pytorch_toolbelt @ git+https://github.com/papkov/pytorch-toolbelt
 torchnet>=0.0.4
 visdom
 jsonpatch

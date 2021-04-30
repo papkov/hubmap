@@ -19,7 +19,7 @@ from pytorch_toolbelt.inference.tiles import ImageSlicer
 from rasterio.windows import Window
 from sklearn.model_selection import train_test_split
 from torch import Tensor as T
-from torch.utils.data import ConcatDataset, DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, WeightedRandomSampler
 from tqdm.auto import tqdm
 
 from modules import util
@@ -96,7 +96,7 @@ class SearchDataset(Dataset):
     def __init__(self, transform=None):
         self.transform = transform
         self.images, self.masks, _ = get_file_paths(
-            path="/gpfs/hpc/home/papkov/hubmap/data/hubmap-256x256/",
+            paths="/gpfs/hpc/home/papkov/hubmap/data/hubmap-256x256/",
             # TODO remove hardcode
             use_ids=(0, 1, 2, 3, 4, 5, 6),
         )
@@ -130,7 +130,7 @@ class SearchDataset(Dataset):
 class TiffFile(Dataset):
     path: Union[Path, str]
     tile_size: Union[Tuple[int, int], int] = 1024
-    tile_step: Union[Tuple[int, int], int] = 896
+    tile_step: Union[Tuple[int, int], int] = 704
     scale_factor: float = 1
     random_crop: bool = False
     num_threads: Union[str, int] = "all_cpus"
@@ -636,7 +636,7 @@ def get_training_augmentations():
     """
     transforms = albu.Compose(
         [
-            # albu.RandomCrop(256, 256),
+            # albu.RandomCrop(224, 224),
             # did not work
             # albu.MaskDropout(
             #     max_objects=1, image_fill_value=[160, 115, 173]  #  HuBMAP
@@ -820,7 +820,9 @@ def get_train_valid_datasets_from_path(
     valid_split: float = 0.1,
     transforms: Optional[Union[albu.BasicTransform, Any]] = None,
     stats: Optional[str] = None,
-) -> Tuple[Union[TrainDataset, TrainTiffDataset], TrainDataset]:
+) -> Tuple[
+    Union[TrainDataset, TrainTiffDataset], TrainDataset, List[PathT], List[PathT]
+]:
 
     if valid_ids is None and path_tiff_data:
         print("Set path_tiff_data=None, because valid_ids not provided")
@@ -845,7 +847,27 @@ def get_train_valid_datasets_from_path(
         transforms=transforms,
         stats=stats,
     )
-    return train_ds, valid_ds
+    return train_ds, valid_ds, train_images, valid_images
+
+
+def get_weights(
+    path: PathT,
+    train_images: List[PathT],
+    weight_empty: float = 0.2,
+    normalize_by_image: bool = True,
+) -> List[float]:
+    meta = pd.read_csv(path, index_col=0)
+    # select only train images from meta
+    meta = meta[meta.filename.isin([f.name for f in train_images])]
+    # set equal weights to begin with
+    meta["weight"] = 1.0
+    # set weight for tiles without masks
+    meta.loc[meta.is_empty, "weight"] = weight_empty
+    # set equal sample probability from big and small images
+    if normalize_by_image:
+        meta.weight = meta.groupby("image_id").weight.apply(lambda x: x / len(x))
+    # return list
+    return meta.weight.to_list()
 
 
 def get_data_loaders(
@@ -854,22 +876,41 @@ def get_data_loaders(
     train_bs: int,
     valid_bs: int,
     num_workers: int,
+    weights: Optional[List[float]] = None,
+    num_samples: Optional[int] = None,
+    replacement: bool = False,
+    pin_memory: bool = True,
 ) -> "OrderedDict[str, DataLoader]":
+
+    # limit num_samples by the size of the data
+    if num_samples is None:
+        num_samples = len(train_ds)
+    if not replacement:
+        num_samples = min(num_samples, len(train_ds))
+
+    # setup sampler if weights were provided
+    sampler = None
+    if weights is not None:
+        sampler = WeightedRandomSampler(
+            weights=weights, num_samples=num_samples, replacement=replacement
+        )
+
     return OrderedDict(
         train=DataLoader(
             train_ds,
             batch_size=train_bs,
             # set num_workers=0 for tiff because of rasterio
             num_workers=num_workers if isinstance(train_ds, TrainDataset) else 0,
-            pin_memory=True,
+            pin_memory=pin_memory,
             drop_last=True,
-            shuffle=True,
+            shuffle=True if sampler is None else False,
+            sampler=sampler,
         ),
         valid=DataLoader(
             valid_ds,
             batch_size=valid_bs,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=pin_memory,
             drop_last=False,
             shuffle=False,
         ),
