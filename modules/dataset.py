@@ -851,12 +851,14 @@ def get_train_valid_datasets_from_path(
 
 
 def get_weights(
-    path: PathT,
+    path: Union[PathT, List[PathT]],
     train_images: List[PathT],
     weight_empty: float = 0.2,
     normalize_by_image: bool = True,
 ) -> List[float]:
-    meta = pd.read_csv(path, index_col=0)
+    if not isinstance(path, list):
+        path = [path]
+    meta = pd.concat([pd.read_csv(p, index_col=0).reset_index() for p in path]).reset_index()
     # select only train images from meta
     meta = meta[meta.filename.isin([f.name for f in train_images])]
     # set equal weights to begin with
