@@ -1,7 +1,8 @@
+from typing import List, Optional
+
 import numpy as np
 from torch import Tensor as T
 from torch import nn
-from typing import List, Optional
 
 
 class Ensemble(nn.Module):

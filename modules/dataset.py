@@ -858,7 +858,9 @@ def get_weights(
 ) -> List[float]:
     if not isinstance(path, list):
         path = [path]
-    meta = pd.concat([pd.read_csv(p, index_col=0).reset_index() for p in path]).reset_index()
+    meta = pd.concat(
+        [pd.read_csv(p, index_col=0).reset_index() for p in path]
+    ).reset_index()
     # select only train images from meta
     meta = meta[meta.filename.isin([f.name for f in train_images])]
     # set equal weights to begin with
