@@ -119,6 +119,42 @@ class TTATransposeRot180(TTA):
         )
 
 
+class TTARot(TTACompose):
+    """
+    Rotate 90 degrees 3 times
+    """
+
+    def __init__(self, model: nn.Module):
+        super().__init__(
+            model=model,
+            ttas=[
+                TTAIdentity(),  # original
+                TTARot90CW(),  # rotated by 90 degrees
+                TTARot180(),  # rotated by 180 degrees
+                TTARot90CCW(),  # rotated by -90 degrees
+            ],
+        )
+
+
+class TTARotFlip(TTACompose):
+    """
+    Rotate 90 degrees 3 times and both flips
+    """
+
+    def __init__(self, model: nn.Module):
+        super().__init__(
+            model=model,
+            ttas=[
+                TTAIdentity(),  # original
+                TTARot90CW(),  # rotated by 90 degrees
+                TTARot180(),  # rotated by 180 degrees
+                TTARot90CCW(),  # rotated by -90 degrees
+                TTAHorizontalFlip(),  # horizontally-flipped
+                TTAVerticalFlip(),  # vertically-flipped tensor
+            ],
+        )
+
+
 class TTAD4(TTACompose):
     """
     D4 symmetry group
@@ -180,11 +216,15 @@ def get_tta(symmetry: str, model: nn.Module) -> nn.Module:
     :return: TTA class initialized with model
     """
     symmetry = symmetry.lower()
-    if symmetry == "d1":
+    if symmetry.lower() == "d1":
         return TTAD1(model)
-    elif symmetry == "d2":
+    elif symmetry.lower() == "d2":
         return TTAD2(model)
-    elif symmetry == "d4":
+    elif symmetry.lower() == "d4":
         return TTAD4(model)
+    elif symmetry.lower() == "rot":
+        return TTARot(model)
+    elif symmetry.lower() in ("rotflip", "rot_flip"):
+        return TTARotFlip(model)
     else:
-        raise ValueError(f"Incorrect symmetry group {symmetry}, should be D1 | D2 | D4")
+        raise ValueError(f"Incorrect symmetry group {symmetry}, should be D1 | D2 | D4 | rot | rotflip")
