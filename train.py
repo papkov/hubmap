@@ -208,7 +208,12 @@ def main(cfg: DictConfig):
             )
 
             # Datasets
-            train_ds, valid_ds = D.get_train_valid_datasets_from_path(
+            (
+                train_ds,
+                valid_ds,
+                train_images,
+                val_images,
+            ) = D.get_train_valid_datasets_from_path(
                 # path=(cwd / cfg.data.path),
                 path=(cwd / f"data/hubmap-{size}x{size}/"),
                 train_ids=cfg.data.train_ids,

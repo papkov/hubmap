@@ -4,7 +4,7 @@ from copy import copy
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import albumentations as albu
 import cv2
@@ -24,6 +24,7 @@ from tqdm.auto import tqdm
 
 from modules import util
 from modules.augmentation import CopyPaste
+from modules.transforms import NormalizeByImage
 
 Array = np.ndarray
 PathT = Union[Path, str]
@@ -35,6 +36,7 @@ class TrainDataset(Dataset):
     masks: List[Path]
     mean: Tuple[float, ...] = (0.485, 0.456, 0.406)
     std: Tuple[float, ...] = (0.229, 0.224, 0.225)
+    normalizer: Optional[albu.BasicTransform] = None
     stats_file: Optional[str] = None
     transforms: Optional[Union[albu.BasicTransform, Any]] = None
 
@@ -48,6 +50,8 @@ class TrainDataset(Dataset):
         self.to_tensor = ToTensorV2()
         self.dmean = copy(self.mean)
         self.dstd = copy(self.std)
+
+        # TODO update denormalizer if normalizer is provided
         self.denormalize = util.Denormalize(mean=self.mean, std=self.std)
 
     def __getitem__(self, i: int):
@@ -60,12 +64,17 @@ class TrainDataset(Dataset):
         if self.transforms is not None:
             sample = self.transforms(**sample)
 
-        if self.stats is not None and image_id in self.stats:
-            self.mean, self.std = self.stats[image_id]
-        else:
-            self.mean, self.std = copy(self.dmean), copy(self.dstd)
+        if self.normalizer is None:
+            if self.stats is not None and image_id in self.stats:
+                self.mean, self.std = self.stats[image_id]
+            else:
+                self.mean, self.std = copy(self.dmean), copy(self.dstd)
 
-        sample["image"] = albu.normalize(sample["image"], self.mean, self.std)
+            sample["image"] = albu.normalize(sample["image"], self.mean, self.std)
+        else:
+            # assume that normalizer is Albumentation
+            sample = self.normalizer(**sample)
+
         sample = self.to_tensor(**sample)
 
         ret = {
@@ -605,6 +614,7 @@ class TestDataset(TiffFile):
     mean: Tuple[float] = (0.485, 0.456, 0.406)
     std: Tuple[float] = (0.229, 0.224, 0.225)
     recompute_stats: bool = False
+    normalizer: Optional[albu.BasicTransform] = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -616,8 +626,14 @@ class TestDataset(TiffFile):
 
         # Transforms
         self.transforms = albu.Compose(
-            [albu.Normalize(mean=self.mean, std=self.std), ToTensorV2()]
+            [
+                albu.Normalize(mean=self.mean, std=self.std)
+                if self.normalizer is None
+                else self.normalizer,
+                ToTensorV2(),
+            ]
         )
+        # TODO update denormalizer if normalizer is provided
         self.denormalize = util.Denormalize(mean=self.mean, std=self.std)
 
     def __getitem__(self, i: int) -> Dict[str, Any]:

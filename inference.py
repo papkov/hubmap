@@ -3,7 +3,7 @@ import gc
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 
 from modules import dataset as D
 from modules.model import get_segmentation_model
+from modules.transforms import NormalizeByImage
 from modules.tta import get_tta
 from modules.util import rle_encode_less_memory, set_device_id
 
@@ -27,16 +28,17 @@ PathT = Union[Path, str]
 @torch.no_grad()
 def inference_one(
     image_path: PathT,
-    target_path: PathT,
-    cfg: DictConfig,
     model: Union[Module, List[Module]],
-    scale_factor: float,
-    tile_size: int,
-    tile_step: int,
+    target_path: PathT = ".",
+    scale_factor: float = 0.5,
+    tile_size: int = 1024,
+    tile_step: int = 704,
+    mean: Tuple[float] = (0.485, 0.456, 0.406),
+    std: Tuple[float] = (0.229, 0.224, 0.225),
     batch_size: int = 1,
     threshold: float = 0.5,
     interpolate_mode: str = "bicubic",
-    filter_crops: Optional[str] = None,
+    filter_crops: Optional[str] = "tissue",
     save_raw: bool = False,
     tta_mode: Optional[str] = None,
     weight: str = "pyramid",
@@ -44,8 +46,9 @@ def inference_one(
     stats: Optional[str] = None,
     recompute_stats: bool = False,
     refine: bool = False,
-    postprocess: bool = False,
+    postprocessor: Optional[Callable] = None,
     roll: Optional[Dict[str, Tuple[int, int]]] = None,
+    normalize_by_tile: bool = False,
 ) -> Tuple[Dict[str, Any], Tuple[int, int]]:
     """
 
@@ -73,7 +76,6 @@ def inference_one(
     target_path = Path(target_path)
     image_id = str(image_path).split("/")[-1].split(".")[0]
 
-    mean, std = cfg.data.mean, cfg.data.std
     if stats is not None:
         try:
             with open(stats, "r") as f:
@@ -93,6 +95,8 @@ def inference_one(
 
     test_ds = D.TestDataset(
         image_path.as_posix(),
+        # TODO remove hardcode by_channels later, leave for a while since we do not use other options
+        normalizer=NormalizeByImage(by_channel=False) if normalize_by_tile else None,
         mean=mean,
         std=std,
         recompute_stats=recompute_stats,
@@ -170,17 +174,17 @@ def inference_one(
     merger.threshold_(threshold)
     merged = merger.image.cpu().numpy().squeeze().astype(bool)
 
-    if postprocess:
-        # TODO investigate
-        min_glomerulus_area = (
-            16384  # 23480 for val 7, 16972 for val 5 (remove_small_objects makes worse)
-        )
-        merged = remove_small_objects(
-            merged, min_size=min_glomerulus_area, in_place=True
-        )
-        merged = remove_small_holes(
-            merged, area_threshold=min_glomerulus_area, in_place=True
-        )
+    if postprocessor is not None:
+        # min_glomerulus_area = (
+        #     16384  # 23480 for val 7, 16972 for val 5 (remove_small_objects makes worse)
+        # )
+        # merged = remove_small_objects(
+        #     merged, min_size=min_glomerulus_area, in_place=True
+        # )
+        # merged = remove_small_holes(
+        #     merged, area_threshold=min_glomerulus_area, in_place=True
+        # )
+        merged = postprocessor(merged)
 
     if roll is not None:
         if image_id in roll.keys():
@@ -225,12 +229,13 @@ def inference_dir(
     filter_crops: Optional[str] = None,
     tta_mode: Optional[str] = None,
     threshold: float = 0.5,
-    postprocess: bool = False,
+    postprocessor: Optional[Callable] = None,
     interpolate_mode: str = "bicubic",
     weight: str = "pyramid",
     device: str = "gpu",
     stats: Optional[str] = None,
     roll: Optional[Dict[str, Tuple[int, int]]] = None,
+    normalize_by_tile: bool = False,
 ):
     test_path = Path(test_path)
     target_path = Path(target_path)
@@ -242,7 +247,8 @@ def inference_dir(
         rle, shape = inference_one(
             image_path=image_path,
             target_path=target_path,
-            cfg=cfg,
+            mean=cfg.data.mean,
+            std=cfg.data.std,
             model=model,
             scale_factor=scale_factor,
             tile_size=tile_size,
@@ -253,11 +259,12 @@ def inference_dir(
             tta_mode=tta_mode,
             weight=weight,
             threshold=threshold,
-            postprocess=postprocess,
+            postprocessor=postprocessor,
             device=device,
             filter_crops=filter_crops,
             roll=roll,
             stats=stats,
+            normalize_by_tile=normalize_by_tile,
         )
         rle_encodings.append(rle)
 

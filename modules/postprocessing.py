@@ -1,7 +1,8 @@
+from typing import Optional
+
 import numpy as np
 import skimage.morphology
 from tqdm.auto import tqdm
-from typing import Optional
 
 
 def is_label_on_tile_edge(single_label_tile: np.ndarray):
@@ -30,33 +31,39 @@ class TileByTileFilter:
         step_size=50   - step size for traversing tile
     """
 
-    def __init__(self, msk: np.ndarray, tile_size: int = 1024, step_size: int = 128, area_threshold: int = 7000):
-        assert len(msk.shape) == 2
-        assert msk.dtype in [np.uint8, np.uint16, bool]
-        self.msk = msk
+    def __init__(
+        self,
+        tile_size: int = 512,
+        tile_step: int = 128,
+        area_threshold: int = 10000,
+    ):
         self.tile_size = tile_size
-        self.tile_step = step_size
+        self.tile_step = tile_step
         self.area_threshold = area_threshold
-        self.bboxes = self.get_bboxes()
 
-    def get_bboxes(self):
+    def get_bboxes(self, msk: np.ndarray):
         bboxes = []
-        for y in range(0, self.msk.shape[0], self.tile_step):
-            for x in range(0, self.msk.shape[1], self.tile_step):
+        for y in range(0, msk.shape[0], self.tile_step):
+            for x in range(0, msk.shape[1], self.tile_step):
                 ye = y + self.tile_size
                 xe = x + self.tile_size
-                if y < self.msk.shape[0] and x < self.msk.shape[1]:
+                if y < msk.shape[0] and x < msk.shape[1]:
                     bboxes.append((y, x, ye, xe))
         return np.array(bboxes)
 
-    def _remove_small_objects(self, area_threshold: Optional[int] = None):
-        assert area_threshold < self.tile_size ** 2
+    def _remove_small_objects(
+        self, msk: np.ndarray, area_threshold: Optional[int] = None
+    ):
         if area_threshold is None:
             area_threshold = self.area_threshold
+        assert area_threshold < self.tile_size ** 2
 
-        for bbox in tqdm(self.bboxes):
+        bboxes = self.get_bboxes(msk)
+        iterator = tqdm(bboxes)
+        counter = 0
+        for bbox in iterator:
             sy, sx, ey, ex = bbox
-            cropped_tile = self.msk[sy:ey, sx:ex]
+            cropped_tile = msk[sy:ey, sx:ex]
 
             if np.any(cropped_tile):
                 labeled_tile = skimage.morphology.label(cropped_tile)
@@ -70,12 +77,17 @@ class TileByTileFilter:
                     area = np.sum(label_mask)
                     if area < area_threshold and not is_label_on_tile_edge(label_mask):
                         labeled_tile[label_mask] = 0
-                        print(
-                            f"Removed object at [{sy}:{ey}, {sx}:{ex}] with size {area}"
+                        counter += 1
+                        iterator.set_postfix_str(
+                            f"Removed {counter} object at [{sy}:{ey}, {sx}:{ex}] with size {area}"
                         )
 
                 # one tile is now processed and ready to be placed back
-                self.msk[sy:ey, sx:ex] = (labeled_tile > 0).astype(np.uint8)
+                msk[sy:ey, sx:ex] = (labeled_tile > 0).astype(np.uint8)
 
-    def __call__(self, *args, **kwargs):
-        return self._remove_small_objects(*args, **kwargs)
+        return msk
+
+    def __call__(self, msk: np.ndarray, *args, **kwargs):
+        assert msk.dtype in [np.uint8, np.uint16, bool]
+        assert len(msk.shape) == 2
+        return self._remove_small_objects(msk, *args, **kwargs)
