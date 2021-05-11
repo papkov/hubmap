@@ -49,6 +49,7 @@ def inference_one(
     postprocessor: Optional[Callable] = None,
     roll: Optional[Dict[str, Tuple[int, int]]] = None,
     normalize_by_tile: bool = False,
+    crop_border: int = 0,
 ) -> Tuple[Dict[str, Any], Tuple[int, int]]:
     """
 
@@ -117,12 +118,21 @@ def inference_one(
         pin_memory=True,
     )
 
+    # Adjust crop border
+    margin = np.min([test_ds.tiler.margin_start, test_ds.tiler.margin_start])
+    if crop_border > margin:
+        print(f"crop_border {crop_border} exceeded min margin {margin}, adjust")
+        crop_border = margin
+    else:
+        print(f"Use crop_border={crop_border}")
+
     # Allocate tiles
     merger = TileMerger(
         test_ds.tiler.target_shape,
         channels=1,
         weight=test_ds.tiler.weight,
         device=device,
+        crop_border=crop_border,
     )
     print("TileMerger initialized")
 
@@ -236,6 +246,7 @@ def inference_dir(
     stats: Optional[str] = None,
     roll: Optional[Dict[str, Tuple[int, int]]] = None,
     normalize_by_tile: bool = False,
+    crop_border: int = 0,
 ):
     test_path = Path(test_path)
     target_path = Path(target_path)
@@ -265,6 +276,7 @@ def inference_dir(
             roll=roll,
             stats=stats,
             normalize_by_tile=normalize_by_tile,
+            crop_border=crop_border,
         )
         rle_encodings.append(rle)
 

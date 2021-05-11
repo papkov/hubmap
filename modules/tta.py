@@ -227,4 +227,6 @@ def get_tta(symmetry: str, model: nn.Module) -> nn.Module:
     elif symmetry.lower() in ("rotflip", "rot_flip"):
         return TTARotFlip(model)
     else:
-        raise ValueError(f"Incorrect symmetry group {symmetry}, should be D1 | D2 | D4 | rot | rotflip")
+        raise ValueError(
+            f"Incorrect symmetry group {symmetry}, should be D1 | D2 | D4 | rot | rotflip"
+        )
